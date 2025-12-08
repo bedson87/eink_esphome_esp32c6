@@ -57,9 +57,9 @@ Projekt wykorzystuje **ESPHome** do komunikacji z HA. Dane są wstępnie przygot
 
 ## 📸 Galeria
 
-| Zdjęcie 1 | Zdjęcie 2 | Zdjęcie 3 |
-| :---: | :---: | :---: |
-| [Link do Zdjęcie nr 2] | [Link do Zdjęcie nr 2] | [Link do Zdjęcie nr 3] |
+| Ramka przód | Ramka tył |
+| :---: | :---:
+| [ramka.png] | [ramka_tyl.png]
 
 ---
 
