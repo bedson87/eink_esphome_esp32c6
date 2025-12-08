@@ -1,4 +1,4 @@
-# 🖼️ E-Ink Deep Sleep HA Dashboard
+# 🖼️ ESPHome E-Ink HA Dashboard Battery Deepsleep
 
 > Minimalistyczna, energooszczędna ramka E-Ink wyświetlająca kluczowe dane z Home Assistant (pogoda, kalendarz) zoptymalizowana pod kątem długiej pracy na baterii.
 
@@ -59,7 +59,7 @@ Projekt wykorzystuje **ESPHome** do komunikacji z HA. Dane są wstępnie przygot
 
 | Ramka przód | Ramka tył |
 | :---: | :---:
-| [ramka.png] | [ramka_tyl.png]
+| ![Zdjęcie finalnej ramki](ramka.png) | ![Zdjęcie finalnej ramki tył](ramka_tyl.png)
 
 ---
 
