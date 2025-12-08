@@ -1,0 +1,68 @@
+alias: Aktualizacja kalendarza E-Ink (8 Linii / 7 Dni)
+description: >-
+  Pobiera 8 chronologicznie najbliższych wydarzeń z 7 dni i zapisuje do
+  input_text.
+triggers:
+  - minutes: /15
+    trigger: time_pattern
+actions:
+  - variables:
+      start: "{{ now().strftime('%Y-%m-%dT00:00:00%z') }}"
+      end: "{{ (now() + timedelta(days=7)).strftime('%Y-%m-%dT23:59:59%z') }}"
+      dni_skroty:
+        Monday: Pon
+        Tuesday: Wt
+        Wednesday: Śr
+        Thursday: Czw
+        Friday: Pt
+        Saturday: Sob
+        Sunday: Nd
+  - target:
+      entity_id:
+        - calendar.XXXXXXXX_gmail_com
+        - calendar.XXXXXXXX_gmail_com
+        - calendar.birthdays
+        - calendar.swieta_w_polsce
+    data:
+      start_date_time: "{{ start }}"
+      end_date_time: "{{ end }}"
+    response_variable: agenda_raw
+    action: calendar.get_events
+  - variables:
+      ev1: >-
+        {{ agenda_raw.get('calendar.XXXXXXXXX_gmail_com', {}).get('events', [])
+        }}
+      ev2: "{{ agenda_raw.get('XXXXXXXXX_gmail_com', {}).get('events', []) }}"
+      ev3: "{{ agenda_raw.get('calendar.birthdays', {}).get('events', []) }}"
+      ev4: "{{ agenda_raw.get('calendar.swieta_w_polsce', {}).get('events', []) }}"
+      events_all: "{{ ev1 + ev2 + ev3 + ev4 }}"
+      events_sorted: "{{ events_all | sort(attribute='start') | list }}"
+      events_limited: "{{ events_sorted[:8] }}"
+  - repeat:
+      count: 8
+      sequence:
+        - variables:
+            line_index: "{{ repeat.index - 1 }}"
+            entity_id: input_text.kalendarz_e_ink_linia{{ repeat.index }}
+            default_message: |
+              {% if repeat.index == 1 and events_limited | length == 0 %}
+                Brak wydarzeń w najbliższych 7 dniach
+              {% else %}
+                {{ '' }}
+              {% endif %}
+        - target:
+            entity_id: "{{ entity_id }}"
+          data:
+            value: >
+              {% set events = events_limited | default([]) %}  {% if events |
+              length > line_index %}
+                {% set e = events[line_index] %}
+                {% set dt_str = e.start | default('') %}
+                {% set dt = as_datetime(dt_str) %}
+                {% set time_display = ' ' ~ dt.strftime('%H:%M') if 'T' in dt_str and dt.hour != 0 and dt_str != '' else '' %}
+                {{ dni_skroty[dt.strftime('%A')] }} {{ dt.strftime('%d.%m') }}{{ time_display }} – {{ e.summary | default('Brak tytułu') }}
+              {% else %}
+                {{ default_message }}
+              {% endif %}
+          action: input_text.set_value
+mode: single
