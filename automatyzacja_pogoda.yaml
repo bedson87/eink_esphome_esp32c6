@@ -1,0 +1,84 @@
+alias: ESP E-ink - Aktualizuj prognozę pogody - integracja wundeground
+description: >-
+  Pobiera godzinową prognozę pogody. Jeśli prognoza na daną godzinę minęła,
+  używa aktualnego stanu pogody.
+triggers:
+  - minutes: /30
+    trigger: time_pattern
+  - event: start
+    trigger: homeassistant
+conditions: []
+actions:
+  - data:
+      type: hourly
+    target:
+      entity_id: weather.home
+    response_variable: hourly_forecast
+    action: weather.get_forecasts
+  - variables:
+      raw_data: |
+        {{ hourly_forecast['weather.home'].forecast 
+          if hourly_forecast is defined and 'weather.home' in hourly_forecast 
+          else [] }}
+      current_condition: "{{ states('weather.home') }}"
+      current_temp: "{{ state_attr('weather.home', 'temperature') }}"
+  - variables:
+      forecast_12: >
+        {% set target_time = today_at('12:00') | as_timestamp | 
+                             timestamp_custom('%Y-%m-%dT%H:%M:00', false) + 'Z' %}
+        {% set matches = raw_data | selectattr('datetime', 'eq', target_time) |
+        list %}
+
+        {% if matches | length > 0 %}
+          {{ matches[0].condition }}|{{ matches[0].temperature }}
+        {% else %}
+          {# Jeśli brak prognozy (godzina minęła), użyj aktualnej pogody #}
+          {% if now() >= today_at('12:00') %}
+            {{ current_condition }}|{{ current_temp }}
+          {% else %}
+            unknown|0
+          {% endif %}
+        {% endif %}
+      forecast_16: >
+        {% set target_time = today_at('16:00') | as_timestamp | 
+                             timestamp_custom('%Y-%m-%dT%H:%M:00', false) + 'Z' %}
+        {% set matches = raw_data | selectattr('datetime', 'eq', target_time) |
+        list %}
+
+        {% if matches | length > 0 %}
+          {{ matches[0].condition }}|{{ matches[0].temperature }}
+        {% else %}
+          {% if now() >= today_at('16:00') %}
+            {{ current_condition }}|{{ current_temp }}
+          {% else %}
+            unknown|0
+          {% endif %}
+        {% endif %}
+      forecast_20: >
+        {% set target_time = today_at('20:00') | as_timestamp | 
+                             timestamp_custom('%Y-%m-%dT%H:%M:00', false) + 'Z' %}
+        {% set matches = raw_data | selectattr('datetime', 'eq', target_time) |
+        list %}
+
+        {% if matches | length > 0 %}
+          {{ matches[0].condition }}|{{ matches[0].temperature }}
+        {% else %}
+          {% if now() >= today_at('20:00') %}
+            {{ current_condition }}|{{ current_temp }}
+          {% else %}
+            unknown|0
+          {% endif %}
+        {% endif %}
+  - data:
+      entity_id: input_text.eink_forecast_12_wu
+      value: "{{ forecast_12 }}"
+    action: input_text.set_value
+  - data:
+      entity_id: input_text.eink_forecast_16_wu
+      value: "{{ forecast_16 }}"
+    action: input_text.set_value
+  - data:
+      entity_id: input_text.eink_forecast_20_wu
+      value: "{{ forecast_20 }}"
+    action: input_text.set_value
+mode: single
