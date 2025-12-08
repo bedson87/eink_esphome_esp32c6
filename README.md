@@ -34,7 +34,7 @@ W celu optymalizacji zużycia energii zastosowano następującą strategię:
 
 ### ⚡ Pomiar Napięcia Baterii
 
-Do monitorowania poziomu naładowania baterii zastosowano **dzielnik napięcia 1:2** (dwa rezystory 200kΩ). Wyjście z dzielnika jest podłączone do pinu **ADC** na ESP32C6.
+Do monitorowania poziomu naładowania baterii zastosowano **dzielnik napięcia 1:1** (dwa rezystory 200kΩ). Wyjście z dzielnika jest podłączone do pinu **ADC** na ESP32C6.
 
 > ⚠️ **Uwaga:** Dla dalszej redukcji zużycia prądu, idealnym rozwiązaniem jest zastosowanie dzielnika odłączanego za pomocą tranzystora.
 
