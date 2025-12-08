@@ -1,0 +1,963 @@
+esphome:
+  name: esp32-c6-1
+  friendly_name: esp32-c6-1
+
+  on_boot:
+    # 1. KONFIGURACJA ANTENY ZEWNĘTRZNEJ (Priorytet 600.0)
+    - priority: 600.0
+      then:
+        - logger.log: "📡 Switching to EXTERNAL antenna..."
+        - output.turn_off: gpio_rf_enable  # GPIO03 LOW (Enable RF switch)
+        - delay: 10ms
+        - output.turn_on: gpio_ant_select  # GPIO14 HIGH (Select external)
+        - delay: 50ms  # ✅ Delay dla stabilizacji
+        - logger.log: "✅ External antenna active"
+
+    # 2. DOTYCHCZASOWA LOGIKA STARTOWA (Priorytet -10.0)
+    - priority: -10.0
+      then:
+        - logger.log:
+            format: "=== 🚀 XIAO ESP32-C6 START (4MB Flash + 512KB SRAM) ==="
+            level: WARN
+
+        - lambda: |-
+            // ESP32-C6 ma tylko wewnętrzną SRAM (bez PSRAM)
+            uint32_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+            uint32_t total_internal = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
+
+            ESP_LOGI("main", "💾 Całkowita SRAM: %d KB", total_internal / 1024);
+            ESP_LOGI("main", "💾 Wolna SRAM: %d KB", free_internal / 1024);
+
+            // Odczyt powodu restartu
+            esp_reset_reason_t reason = esp_reset_reason();
+            const char* reason_str;
+            switch(reason) {
+              case ESP_RST_POWERON: reason_str = "Power-on"; break;
+              case ESP_RST_SW: reason_str = "Software reset"; break;
+              case ESP_RST_PANIC: reason_str = "Exception/panic"; break;
+              case ESP_RST_INT_WDT: reason_str = "Interrupt watchdog"; break;
+              case ESP_RST_TASK_WDT: reason_str = "Task watchdog"; break;
+              case ESP_RST_WDT: reason_str = "Other watchdog"; break;
+              case ESP_RST_DEEPSLEEP: reason_str = "Deep sleep"; break;
+              case ESP_RST_BROWNOUT: reason_str = "Brownout (LOW VOLTAGE!)"; break;
+              default: reason_str = "Unknown"; break;
+            }
+            ESP_LOGW("main", "🔄 Restart reason: %s", reason_str);
+
+        - wait_until:
+            condition:
+              api.connected:
+            timeout: 30s
+
+        - logger.log: "✅ API connected to Home Assistant"
+
+        - wait_until:
+            condition:
+              lambda: 'return id(sntp_time).now().is_valid();'
+            timeout: 30s
+
+        - logger.log: "✅ Time synchronized"
+
+        - wait_until:
+            condition:
+              lambda: 'return id(preventdeepsleep_set).has_state();'
+            timeout: 30s
+
+        - logger.log: "✅ Helper loaded from HA"
+
+        # Pomiar baterii
+        - logger.log: "🔋 Starting battery measurement..."
+
+        - component.update: battery_voltage_raw
+        - delay: 200ms
+        - component.update: battery_voltage_raw
+        - delay: 200ms
+        - component.update: battery_voltage_raw
+        - delay: 200ms
+        - component.update: battery_level
+        - delay: 300ms
+        - wait_until:
+            condition:
+              lambda: |-
+                return id(battery_level).has_state() &&
+                       !isnan(id(battery_level).state) &&
+                       id(battery_level).state >= 0;
+            timeout: 2s
+        - logger.log: "✅ Battery measurement complete"
+
+        # Czas na odebranie kalendarza z HA
+        - logger.log: "⏳ Waiting 2s for all Calendar lines from HA..."
+        - delay: 2s
+
+        - if:
+            condition:
+              switch.is_on: test_mode_no_display
+            then:
+              - logger.log: "⏩ TEST MODE - Skipping display update"
+            else:
+              - logger.log: "🖼️ Starting e-ink refresh..."
+
+              # Monitoring pamięci przed renderowaniem
+              - lambda: |-
+                  ESP_LOGI("main", "📊 Przed renderowaniem:");
+                  ESP_LOGI("main", "    Free SRAM: %d KB", heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
+
+              - component.update: epaper
+
+              - logger.log: "⏳ Waiting for e-ink to finish (10s max)..."
+              - delay: 10s
+
+              # Monitoring po renderowaniu
+              - lambda: |-
+                  ESP_LOGI("main", "📊 Po renderowaniu:");
+                  ESP_LOGI("main", "    Free SRAM: %d KB", heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
+
+              - logger.log: "✅ Display updated"
+
+        - logger.log: "=== 🌙 Checking deep sleep conditions ==="
+
+        - if:
+            condition:
+              lambda: 'return !id(preventdeepsleep_set).has_state();'
+            then:
+              - logger.log:
+                  format: "⚠️ WARNING: Helper has no state - BLOCKING deep sleep!"
+                  level: ERROR
+            else:
+              - logger.log:
+                  format: "✓ Helper state: %s"
+                  args: ['id(preventdeepsleep_set).state ? "ON (block sleep)" : "OFF (allow sleep)"']
+
+              - if:
+                  condition:
+                    binary_sensor.is_on: preventdeepsleep_set
+                  then:
+                    - logger.log:
+                        format: "🛑 Deep sleep BLOCKED by Home Assistant"
+                        level: WARN
+                  else:
+                    - logger.log: "✓ Helper OFF - allowing deep sleep"
+
+                    - lambda: |-
+                        ESP_LOGD("main", "Current time: %d:%02d",
+                          id(sntp_time).now().hour,
+                          id(sntp_time).now().minute);
+
+                    - if:
+                        condition:
+                          lambda: 'return id(sntp_time).now().hour >= 22 || id(sntp_time).now().hour < 6;'
+                        then:
+                          - logger.log:
+                              format: "🌙 Night detected (hour: %d) -> Deep sleep 8h"
+                              args: ['id(sntp_time).now().hour']
+                              level: WARN
+                          - delay: 2s
+                          - logger.log: "💤 Entering deep sleep..."
+                          - deep_sleep.enter:
+                              id: deep_sleep_component
+                              sleep_duration: 8h
+                        else:
+                          - logger.log:
+                              format: "☀️ Day (hour: %d) -> Deep sleep 60min"
+                              args: ['id(sntp_time).now().hour']
+                              level: WARN
+                          - delay: 2s
+                          - logger.log: "💤 Entering deep sleep..."
+                          - deep_sleep.enter:
+                              id: deep_sleep_component
+                              sleep_duration: 60min
+# ===========================================
+#  ESP32-C6 CONFIG - XIAO OPTIMIZED
+# ===========================================
+esp32:
+  board: esp32-c6-devkitc-1
+  variant: esp32c6
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+    # Optymalizacja zużycia energii
+    sdkconfig_options:
+      # Power Management
+      CONFIG_PM_ENABLE: "y"
+###      CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80: "y"  # 80MHz zamiast 160MHz
+      # Deep Sleep Optimization
+      CONFIG_ESP_SLEEP_POWER_DOWN_FLASH: "y"
+      CONFIG_ESP_SLEEP_RTC_BUS_ISO_WORKAROUND: "y"
+      # Wyłącz nieużywane peryferia
+      CONFIG_ESP_PHY_REDUCE_TX_POWER: "y"
+
+
+api:
+  encryption:
+    key: "XXXXXXXXXXX"
+
+ota:
+  - platform: esphome
+    password: "XXXXXXXXXXX"
+
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  baud_rate: 115200
+  level: DEBUG  # WARN Dla testów; potem zmień na ERROR i baud_rate: 0
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+  # C6 ma słabszy zasięg - opcjonalnie zwiększ moc TX
+  output_power: 20dB  # Max dla C6
+
+output:
+  - platform: gpio
+    pin: GPIO3
+    id: gpio_rf_enable #do aktywacji anteny zewnetrznej
+    inverted: false
+
+  - platform: gpio
+    pin: GPIO14
+    id: gpio_ant_select #do aktywacji anteny zewnetrznej
+    inverted: false
+
+deep_sleep:
+  id: deep_sleep_component
+
+
+# ===========================================
+#  BUTTONS (Testing & Control)
+# ===========================================
+button:
+  - platform: template
+    name: "🔄 Uruchom on_boot ręcznie"
+    on_press:
+      - logger.log:
+          format: "▶️ Manual on_boot execution"
+          level: WARN
+
+      - if:
+          condition:
+            api.connected:
+          then:
+            - logger.log: "✓ API connected"
+          else:
+            - logger.log:
+                format: "⚠️ API NOT connected!"
+                level: ERROR
+
+      - if:
+          condition:
+            lambda: 'return id(sntp_time).now().is_valid();'
+          then:
+            - logger.log: "✓ Time synchronized"
+          else:
+            - logger.log:
+                format: "⚠️ Time NOT synchronized!"
+                level: ERROR
+
+      - delay: 2s
+      - if:
+          condition:
+            lambda: 'return id(preventdeepsleep_set).has_state();'
+          then:
+            - logger.log:
+                format: "✓ Helper has state: %s"
+                args: ['id(preventdeepsleep_set).state ? "ON" : "OFF"']
+          else:
+            - logger.log:
+                format: "⚠️ Helper has NO state!"
+                level: ERROR
+
+  - platform: template
+    name: "🖼️ Ręczna aktualizacja ekranu"
+    on_press:
+      - if:
+          condition:
+            switch.is_on: test_mode_no_display
+          then:
+            - logger.log: "⚠️ Cannot refresh - test mode active"
+          else:
+            - logger.log: "🖼️ Manual display refresh..."
+            - component.update: epaper
+
+  - platform: template
+    name: "💤 Wymuś Deep Sleep 15min"
+    on_press:
+      - logger.log: "Forcing Deep Sleep 15 minutes"
+      - deep_sleep.enter:
+          id: deep_sleep_component
+          sleep_duration: 15min
+
+  - platform: template
+    name: "🛑 Zapobiegaj Deep Sleep"
+    on_press:
+      - logger.log: "Deep Sleep blocked by button"
+      - deep_sleep.prevent: deep_sleep_component
+
+  - platform: template
+    name: "✅ Zezwól na Deep Sleep"
+    on_press:
+      - logger.log: "Deep Sleep allowed"
+      - deep_sleep.allow: deep_sleep_component
+
+  - platform: restart
+    name: "🔄 Restart ESP"
+
+switch:
+  - platform: template
+    name: "🧪 Tryb testowy (BEZ ekranu)"
+    id: test_mode_no_display
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - logger.log: "⚠️ TEST MODE - Display updates disabled"
+    on_turn_off:
+      - logger.log: "✓ Normal mode - Display updates enabled"
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/Warsaw
+    servers:
+      - 0.pl.pool.ntp.org
+      - 1.pl.pool.ntp.org
+      - time.google.com
+    on_time_sync:
+      - logger.log:
+          format: "⏰ Time synchronized via SNTP"
+          level: INFO
+
+interval:
+  - interval: 60s
+    then:
+      - if:
+          condition:
+            lambda: 'return !id(sntp_time).now().is_valid();'
+          then:
+            - logger.log:
+                format: "⚠️ BACKUP: on_boot didn't work, trying from interval..."
+                level: WARN
+
+binary_sensor:
+  - platform: homeassistant
+    name: "Zapobiega deep_sleep"
+    entity_id: input_boolean.zapobiega_deepsleep_esp_ramka
+    id: preventdeepsleep_set
+    internal: true
+    on_state:
+      - logger.log:
+          format: "📡 Helper changed state to: %s"
+          args: ['id(preventdeepsleep_set).state ? "ON (block sleep)" : "OFF (allow)"']
+          level: INFO
+
+sensor:
+  # ===========================================
+  #  POMIAR BATERII - XIAO C6 z dzielnikiem
+  # ===========================================
+  - platform: adc
+    pin: GPIO0  # D0 - dedykowany ADC
+    name: "Napięcie Baterii"
+    id: battery_voltage_raw
+    unit_of_measurement: "V"
+    attenuation: 12db  # 0-3.3V range
+    update_interval: never
+    accuracy_decimals: 2
+    filters:
+      - multiply: 2.0  # Dzielnik 1:1 (200kΩ + 200kΩ)
+      - sliding_window_moving_average:
+          window_size: 3
+          send_every: 3
+    internal: true
+
+  - platform: template
+    name: "Poziom Baterii"
+    id: battery_level
+    unit_of_measurement: "%"
+    icon: "mdi:battery"
+    accuracy_decimals: 0
+    lambda: |-
+      return id(battery_voltage_raw).state;
+    filters:
+      - calibrate_linear:
+          method: exact
+          datapoints:
+            - 3.30 -> 0.0
+            - 3.50 -> 10.0
+            - 3.70 -> 40.0
+            - 3.90 -> 75.0
+            - 4.10 -> 100.0
+      - lambda: |-
+          if (x >= 100) return 100;
+          if (x <= 0) return 0;
+          return x;
+    internal: false
+
+  # Home Assistant sensors
+  - platform: homeassistant
+    id: temp
+    entity_id: weather.home #lub .dom dla wbudowanej integracji
+    attribute: temperature
+
+  - platform: homeassistant
+    id: pressure
+    entity_id: weather.home #lub .dom dla wbudowanej integracji
+    attribute: pressure
+
+  - platform: homeassistant
+    id: humidity
+    entity_id: weather.home #lub .dom dla wbudowanej integracji
+    attribute: humidity
+
+  - platform: homeassistant
+    id: wind
+    entity_id: weather.home #lub .dom dla wbudowanej integracji
+    attribute: wind_speed
+
+  - platform: uptime
+    id: uptime_sensor
+    name: "System Uptime"
+
+
+# ===========================================
+#  TEXT SENSORS - POGODA GODZINOWA
+# ===========================================
+text_sensor:
+  - platform: homeassistant
+    id: weather_state
+    entity_id: weather.home #lub .dom dla wbudowanej integracji
+
+  - platform: homeassistant
+    id: air_quality
+    entity_id: sensor.airly_poziom_smogu_pl
+
+  # Prognoza godzinowa (format: "condition|temperature")
+  - platform: homeassistant
+    id: forecast_12
+    entity_id: input_text.eink_forecast_12_wu #bez _WU dla wbudowanej integracji
+
+  - platform: homeassistant
+    id: forecast_16
+    entity_id: input_text.eink_forecast_16_wu #bez _WU dla wbudowanej integracji
+
+  - platform: homeassistant
+    id: forecast_20
+    entity_id: input_text.eink_forecast_20_wu #bez _WU dla wbudowanej integracji
+
+  # Kalendarz w 8 liniach
+  - platform: homeassistant
+    name: "Kalendarz_Linia_1"
+    id: Kalendarz_Linia_1
+    entity_id: input_text.kalendarz_e_ink_linia1
+    icon: mdi:calendar-today
+
+  - platform: homeassistant
+    name: "Kalendarz_Linia_2"
+    id: Kalendarz_Linia_2
+    entity_id: input_text.kalendarz_e_ink_linia2
+    icon: mdi:calendar-blank-outline
+
+  - platform: homeassistant
+    name: "Kalendarz_Linia_3"
+    id: Kalendarz_Linia_3
+    entity_id: input_text.kalendarz_e_ink_linia3
+    icon: mdi:calendar-blank-outline
+
+  - platform: homeassistant
+    name: "Kalendarz_Linia_4"
+    id: Kalendarz_Linia_4
+    entity_id: input_text.kalendarz_e_ink_linia4
+    icon: mdi:calendar-blank-outline
+
+  - platform: homeassistant
+    name: "Kalendarz_Linia_5"
+    id: Kalendarz_Linia_5
+    entity_id: input_text.kalendarz_e_ink_linia5
+
+  - platform: homeassistant
+    name: "Kalendarz_Linia_6"
+    id: Kalendarz_Linia_6
+    entity_id: input_text.kalendarz_e_ink_linia6
+
+  - platform: homeassistant
+    name: "Kalendarz_Linia_7"
+    id: Kalendarz_Linia_7
+    entity_id: input_text.kalendarz_e_ink_linia7
+
+  - platform: homeassistant
+    name: "Kalendarz_Linia_8"
+    id: Kalendarz_Linia_8
+    entity_id: input_text.kalendarz_e_ink_linia8
+
+# ===========================================
+#  SPI - XIAO ESP32-C6 HARDWARE SPI
+# ===========================================
+spi:
+  clk_pin: GPIO19   # SDIO_CLK (D8/SCK na pinout) ✅
+  mosi_pin: GPIO18   # SDIO_CMD (D10/MOSI na pinout) ✅
+  miso_pin: GPIO20  # SDIO_DATA0 (D9/MISO na pinout) ✅
+
+# ===========================================
+#  FONTY + MDI ICONS - WERSJA FINALNA
+# ===========================================
+font:
+  - file: "gfonts://Roboto@700"
+    id: f_big
+    size: 60
+    glyphs: '0123456789.°C -'
+
+  - file: "gfonts://Roboto@700"
+    id: f_header
+    size: 33
+    glyphs: ' .:0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZĄĆĘŁŃÓŚŹŻ—–'
+  # ✅ Usunięte: małe litery, niepotrzebne znaki specjalne
+
+  - file: "gfonts://Roboto@400"
+    id: f_normal
+    size: 26
+    glyphs: ' !"%()+=,\-_.:°/0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzĄąĆćĘęŁłŃńÓóŚśŹźŻż—–'
+
+  - file: "gfonts://Roboto@400"
+    id: f_small
+    size: 20
+    glyphs: ' ?!"%()+=,\-_.:°/0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzĄąĆćĘęŁłŃńÓóŚśŹźŻż—–'
+
+  - file: "gfonts://Roboto@700"  # Bold
+    id: f_small_bold
+    size: 20
+    glyphs: ' ?!"%()+=,\-_.:°/0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzĄąĆćĘęŁłŃńÓóŚśŹźŻż—–'
+
+  # MDI Icons - duże (główna pogoda) - TYLKO SPRAWDZONE IKONY
+  - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
+    id: mdi_large
+    size: 120
+    glyphs: [
+      "\U000F0599", # weather-sunny
+      "\U000F0594", # weather-night
+      "\U000F0590", # weather-cloudy (użyjemy dla partly-cloudy też)
+      "\U000F0597", # weather-rainy
+      "\U000F0596", # weather-pouring
+      "\U000F0593", # weather-lightning
+      "\U000F067E", # weather-lightning-rainy
+      "\U000F0598", # weather-snowy
+      "\U000F067F", # weather-snowy-rainy
+      "\U000F0591", # weather-fog
+      "\U000F0592", # weather-hail
+      "\U000F059E", # weather-windy
+    ]
+
+  # MDI Icons - małe (prognoza)
+  - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
+    id: mdi_small
+    size: 60
+    glyphs: [
+      "\U000F0599", # weather-sunny
+      "\U000F0594", # weather-night
+      "\U000F0590", # weather-cloudy (użyjemy dla partly-cloudy też)
+      "\U000F0597", # weather-rainy
+      "\U000F0596", # weather-pouring
+      "\U000F0593", # weather-lightning
+      "\U000F067E", # weather-lightning-rainy
+      "\U000F0598", # weather-snowy
+      "\U000F067F", # weather-snowy-rainy
+      "\U000F0591", # weather-fog
+      "\U000F0592", # weather-hail
+      "\U000F059E", # weather-windy
+    ]
+
+  # MDI Icons - mikro (metryki)
+  - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
+    id: mdi_micro
+    size: 24
+    glyphs: [
+      "\U000F058E", # water-percent
+      "\U000F029A", # gauge
+      "\U000F059E", # weather-windy
+###      "\U000F0D43", # air-filter
+      "\U000F0082", # battery-90
+      "\U000F007E", # battery-50
+      "\U000F007A", # battery-low
+      "\U000F10CD", # battery-critical
+      "\U000F0BC8", # czaszka dla smog
+      "\U000F0BC7", # czaszka z kośćmi dla wysokiego poziomu smog
+    ]
+
+  # MDI Icons - mikro (metryki)
+  - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
+    id: mdi_header
+    size: 33
+    glyphs: [
+      "\U000F07D0", # home-assistant
+    ]
+
+# ===========================================
+#  E-INK DISPLAY - XIAO C6 PINOUT
+# ===========================================
+display:
+  - platform: waveshare_epaper
+    id: epaper
+    model: 7.50inV2p
+    cs_pin: GPIO21    # SDIO_DATA1 - Chip Select
+    dc_pin: GPIO22    # SDIO_DATA2 - Data/Command
+    reset_pin: GPIO23 # SDIO_DATA3 - Reset
+    
+    # ✅ BUSY na GPIO2 (D2/A2) - przednia strona, ADC-capable ale nie koliduje
+    busy_pin:
+      number: GPIO2   # D2 (przód płytki) - Busy signal
+      inverted: true  # Dla Waveshare Rev 2
+
+    full_update_every: 30
+    reset_duration: 2ms
+    update_interval: never
+    rotation: 90  # Układ pionowy (480x800)
+
+#################### RYSOWANIE ####################
+    lambda: |-
+      ESP_LOGI("display", "🖼️ Rendering new layout...");
+
+      const int W = 480;
+      const int H = 800;
+      const int PAD = 15;
+
+      const int MAIN_ICON_X = 110;   // Ikona pogody nieco bardziej w prawo dla lepszego wyśrodkowania
+      const int MAIN_TEMP_X = 110;   // Temperatura w tej samej osi co ikona
+      const int METRICS_X = 220;     // Metryki bardziej w lewo (było 240)
+
+      // ZOPTYMALIZOWANE STAŁE DLA KALENDARZA
+      const int FORECAST_HEIGHT = 120;
+      const int CALENDAR_Y_START_OFFSET = 5;
+      const int CALENDAR_LINE_HEIGHT = 45;  // Zwiększone z 30 (więcej miejsca po tytule)
+      const int LINE_SPACING = 24;          // Zwiększone z 22 (większy odstęp między wydarzeniami)
+
+      const auto BLACK = Color(255, 255, 255);
+      const auto WHITE = Color(0, 0, 0);
+      const auto GRAY = Color(170, 170, 170);
+      const auto LINE = Color(85, 85, 85);
+
+      it.fill(WHITE);
+
+      // --- 1. FUNKCJA PARSUJĄCA POGODĘ ---
+      auto parse_forecast = [](const std::string &s) -> std::pair<std::string, float> {
+        size_t pos = s.find('|');
+        if (pos != std::string::npos) {
+          std::string cond = s.substr(0, pos);
+          cond.erase(0, cond.find_first_not_of(" \n\r\t"));
+          cond.erase(cond.find_last_not_of(" \n\r\t") + 1);
+          float temp = atof(s.substr(pos + 1).c_str());
+          return {cond, temp};
+        }
+        return {"unknown", 0.0};
+      };
+
+      // --- 2. FUNKCJA DOBIERAJĄCA IKONY (POPRAWIONE KODY MDI) ---
+      auto get_icon = [](const std::string &c) -> const char* {
+        // CLEAR (bezchmurnie)
+        if (c == "sunny" || c == "clear-day") return "\U000F0599"; // weather-sunny
+        if (c == "clear-night") return "\U000F0594"; // weather-night
+
+        // PARTLY CLOUDY (częściowe zachmurzenie) - używamy cloudy
+        if (c == "partlycloudy" || c == "partly-cloudy-day" || c == "partly-cloudy-night") {
+          return "\U000F0590"; // weather-cloudy
+        }
+
+        // CLOUDY (pochmurno)
+        if (c == "cloudy") return "\U000F0590"; // weather-cloudy
+
+        // FOG/HAZE (mgła/zamglenie)
+        if (c == "fog" || c == "hazy") return "\U000F0591"; // weather-fog
+
+        // RAIN (deszcz)
+        if (c == "rainy") return "\U000F0597"; // weather-rainy
+        if (c == "pouring") return "\U000F0596"; // weather-pouring
+
+        // LIGHTNING (burza)
+        if (c == "lightning") return "\U000F0593"; // weather-lightning
+        if (c == "lightning-rainy" || c == "thunderstorm") return "\U000F067E"; // weather-lightning-rainy
+
+        // SNOW (śnieg)
+        if (c == "snowy") return "\U000F0598"; // weather-snowy
+        if (c == "snowy-rainy") return "\U000F067F"; // weather-snowy-rainy
+
+        // HAIL (grad)
+        if (c == "hail") return "\U000F0592"; // weather-hail
+
+        // WIND (wiatr)
+        if (c == "windy" || c == "windy-variant") return "\U000F059E"; // weather-windy
+
+        // EXCEPTIONAL / UNKNOWN - używamy sunny jako fallback
+        if (c == "exceptional" || c == "unknown") return "\U000F0599"; // weather-sunny
+
+        // Jeśli nic nie pasuje
+        ESP_LOGW("weather", "Unknown weather condition: '%s' - using sunny fallback", c.c_str());
+        return "\U000F0599"; // weather-sunny jako domyślny
+      };
+
+      auto t = id(sntp_time).now();
+      const char* dni[] = {"NIEDZIELA", "PONIEDZIAŁEK", "WTOREK", "ŚRODA",
+                           "CZWARTEK", "PIĄTEK", "SOBOTA"};
+      int y = PAD;
+
+      // ========== NAGŁÓWEK ==========
+      // Ikona HA - wyśrodkowana pionowo z datą
+      it.printf(PAD + 2, y + 4, id(mdi_header), BLACK, "\U000F07D0"); // home-assistant
+
+      // Punkt centrowania przesunięty o +15px w prawo, aby uniknąć kolizji z ikoną
+      const int HEADER_CENTER_X = W/2 + 15; 
+
+      char date[64];
+      snprintf(date, sizeof(date), "%02d.%02d.%04d %s",
+               t.day_of_month, t.month, t.year, dni[t.day_of_week - 1]);
+      
+      // Zastosowanie nowego, przesuniętego punktu centrowania
+      it.printf(HEADER_CENTER_X, y, id(f_header), BLACK, TextAlign::TOP_CENTER, "%s", date);
+
+      y += 45;
+      it.line(PAD, y, W - PAD, y, LINE);
+      y += 15;
+
+      // ========== SEKCJA GŁÓWNA: IKONA + TEMP + METRYKI ==========
+      int main_y = y;
+
+      // LEWA: Ikona + temperatura (ZWARTE - zbliżone do środka bloku)
+      if (id(weather_state).has_state()) {
+        std::string ws = std::string(id(weather_state).state.c_str());
+        ESP_LOGI("weather", "Main weather state: '%s'", ws.c_str());
+        // Ikona niżej (Y=60 zamiast 50) - bardziej w centrum bloku
+        it.printf(MAIN_ICON_X, main_y + 60, id(mdi_large), BLACK, TextAlign::CENTER, "%s", get_icon(ws));
+      }
+
+      if (id(temp).has_state()) {
+        char tmp[16];
+        snprintf(tmp, sizeof(tmp), "%.0f°C", id(temp).state);
+        // Temperatura wyżej (Y=150 zamiast 160) - bliżej ikony
+        it.printf(MAIN_TEMP_X, main_y + 150, id(f_big), BLACK, TextAlign::CENTER, "%s", tmp);
+      }
+
+      // PRAWA: Metryki (IKONY WYRÓWNANE z baseline tekstu)
+      int met_x = METRICS_X;
+      int met_y = main_y + 40;  // Start wyżej (było 50)
+
+      if (id(humidity).has_state()) {
+        // Ikona wyrównana z tekstem (lekko w górę dla baseline alignment)
+        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F058E"); // water-percent
+        it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Wilgotność: %.0f%%", id(humidity).state);
+        met_y += 32;
+      }
+      if (id(pressure).has_state()) {
+        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F029A"); // gauge
+        it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Ciśnienie: %.0f hPa", id(pressure).state);
+        met_y += 32;
+      }
+      if (id(wind).has_state()) {
+        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F059E"); // weather-windy
+        it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Wiatr: %.1f km/h", id(wind).state);
+        met_y += 32;
+      }
+      if (id(air_quality).has_state()) {
+        std::string smog_level = id(air_quality).state.c_str();
+
+        // Dobierz ikonę na podstawie poziomu smogu
+        const char* smog_icon;
+        if (smog_level == "niski" || smog_level == "średni") {
+          smog_icon = "\U000F0BC8";     // skull (czaszka)
+        } else {
+          smog_icon = "\U000F0BC7";     // skull-crossbones (czaszka z kośćmi)
+        }
+
+        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "%s", smog_icon);
+        it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Smog: %s", smog_level.c_str());
+        met_y += 32;
+      }
+
+      y = main_y + 220;
+      it.line(PAD, y, W - PAD, y, LINE);
+      y += 15;
+
+      // ========== PROGNOZA GODZINOWA ==========
+      auto draw_hour = [&](int x, int yy, const char* label, const std::string &fc_str) {
+        auto [cond, temp] = parse_forecast(fc_str);
+        ESP_LOGI("weather", "Forecast %s: condition='%s', temp=%.1f", label, cond.c_str(), temp);
+
+        const int ICON_Y = yy + 55;
+        const int TEMP_Y = yy + 85;
+
+        it.printf(x, yy, id(f_normal), BLACK, TextAlign::TOP_CENTER, "%s", label);
+        it.printf(x, ICON_Y, id(mdi_small), BLACK, TextAlign::CENTER, "%s", get_icon(cond));
+        char t_str[16];
+        snprintf(t_str, sizeof(t_str), "%.0f°C", temp);
+        it.printf(x, TEMP_Y, id(f_normal), BLACK, TextAlign::TOP_CENTER, "%s", t_str);
+      };
+
+      int fc_y = y;
+      int col = W / 3;
+
+      if (id(forecast_12).has_state()) {
+        draw_hour(col/2, fc_y, "12:00", id(forecast_12).get_state());
+      }
+      if (id(forecast_16).has_state()) {
+        draw_hour(W/2, fc_y, "16:00", id(forecast_16).get_state());
+      }
+      if (id(forecast_20).has_state()) {
+        draw_hour(W - col/2, fc_y, "20:00", id(forecast_20).get_state());
+      }
+
+      // WYZNACZENIE PUNKTU STARTOWEGO KALENDARZA
+      int CALENDAR_Y_START = fc_y + FORECAST_HEIGHT + CALENDAR_Y_START_OFFSET;
+
+      it.line(PAD, CALENDAR_Y_START, W - PAD, CALENDAR_Y_START, LINE);
+      CALENDAR_Y_START += 15;
+
+      // ========== KALENDARZ (8 Linii) ==========
+      int current_y = CALENDAR_Y_START;
+
+      ESP_LOGI("display", "✏️ Starting Calendar block at Y=%d", current_y);
+
+      // TYTUŁ (POGRUBIONY)
+      it.printf(PAD, current_y, id(f_header), BLACK, "KALENDARZ:");
+      current_y += CALENDAR_LINE_HEIGHT;
+
+      // Funkcja pomocnicza: Sprawdza czy wydarzenie jest dzisiaj
+      auto is_today = [&t](const std::string &line) -> bool {
+        if (line.empty()) return false;
+
+        // Format linii: "Sob 29.11 12:30 – Wydarzenie" lub "Sob 29.11 – Wydarzenie"
+        // Wyciągamy dzień i miesiąc z linii
+        size_t space_pos = line.find(' ');
+        if (space_pos == std::string::npos) return false;
+
+        std::string date_part = line.substr(space_pos + 1);  // "29.11 ..."
+
+        // Wyciągnij dzień (przed pierwszą kropką)
+        size_t dot_pos = date_part.find('.');
+        if (dot_pos == std::string::npos) return false;
+
+        int event_day = atoi(date_part.substr(0, dot_pos).c_str());
+
+        // Wyciągnij miesiąc (między kropkami)
+        size_t second_dot = date_part.find('.', dot_pos + 1);
+        if (second_dot == std::string::npos) {
+          // Próbujemy znaleźć spację (dla formatu bez godziny)
+          second_dot = date_part.find(' ', dot_pos + 1);
+        }
+
+        int event_month = atoi(date_part.substr(dot_pos + 1, second_dot - dot_pos - 1).c_str());
+
+        // Porównaj z dzisiejszą datą
+        return (event_day == t.day_of_month && event_month == t.month);
+      };
+
+      // Linia 1
+      if (id(Kalendarz_Linia_1).has_state()) {
+        std::string l1_state = id(Kalendarz_Linia_1).get_state();
+        if (!l1_state.empty()) {
+          auto font = is_today(l1_state) ? id(f_small_bold) : id(f_small);
+          it.print(PAD, current_y, font, BLACK, l1_state.c_str());
+        }
+      }
+      current_y += LINE_SPACING;
+
+      // Linia 2
+      if (id(Kalendarz_Linia_2).has_state()) {
+        std::string l2_state = id(Kalendarz_Linia_2).get_state();
+        if (!l2_state.empty()) {
+          auto font = is_today(l2_state) ? id(f_small_bold) : id(f_small);
+          it.print(PAD, current_y, font, BLACK, l2_state.c_str());
+        }
+      }
+      current_y += LINE_SPACING;
+
+      // Linia 3
+      if (id(Kalendarz_Linia_3).has_state()) {
+        std::string l3_state = id(Kalendarz_Linia_3).get_state();
+        if (!l3_state.empty()) {
+          auto font = is_today(l3_state) ? id(f_small_bold) : id(f_small);
+          it.print(PAD, current_y, font, BLACK, l3_state.c_str());
+        }
+      }
+      current_y += LINE_SPACING;
+
+      // Linia 4
+      if (id(Kalendarz_Linia_4).has_state()) {
+        std::string l4_state = id(Kalendarz_Linia_4).get_state();
+        if (!l4_state.empty()) {
+          auto font = is_today(l4_state) ? id(f_small_bold) : id(f_small);
+          it.print(PAD, current_y, font, BLACK, l4_state.c_str());
+        }
+      }
+      current_y += LINE_SPACING;
+
+      // Linia 5
+      if (id(Kalendarz_Linia_5).has_state()) {
+        std::string l5_state = id(Kalendarz_Linia_5).get_state();
+        if (!l5_state.empty()) {
+          auto font = is_today(l5_state) ? id(f_small_bold) : id(f_small);
+          it.print(PAD, current_y, font, BLACK, l5_state.c_str());
+        }
+      }
+      current_y += LINE_SPACING;
+
+      // Linia 6
+      if (id(Kalendarz_Linia_6).has_state()) {
+        std::string l6_state = id(Kalendarz_Linia_6).get_state();
+        if (!l6_state.empty()) {
+          auto font = is_today(l6_state) ? id(f_small_bold) : id(f_small);
+          it.print(PAD, current_y, font, BLACK, l6_state.c_str());
+        }
+      }
+      current_y += LINE_SPACING;
+
+      // Linia 7
+      if (id(Kalendarz_Linia_7).has_state()) {
+        std::string l7_state = id(Kalendarz_Linia_7).get_state();
+        if (!l7_state.empty()) {
+          auto font = is_today(l7_state) ? id(f_small_bold) : id(f_small);
+          it.print(PAD, current_y, font, BLACK, l7_state.c_str());
+        }
+      }
+      current_y += LINE_SPACING;
+
+      // Linia 8
+      if (id(Kalendarz_Linia_8).has_state()) {
+        std::string l8_state = id(Kalendarz_Linia_8).get_state();
+        if (!l8_state.empty()) {
+          auto font = is_today(l8_state) ? id(f_small_bold) : id(f_small);
+          it.print(PAD, current_y, font, BLACK, l8_state.c_str());
+        }
+      }
+
+      // ========== STOPKA ==========
+      it.line(PAD, H - 35, W - PAD, H - 35, LINE);
+
+      char upd[64];
+      snprintf(upd, sizeof(upd), "Aktualizacja: %02d.%02d.%04d %02d:%02d",
+               t.day_of_month, t.month, t.year, t.hour, t.minute);
+      it.printf(PAD, H - 7, id(f_small), GRAY, TextAlign::BOTTOM_LEFT, "%s", upd);
+
+      // Wyświetl baterię z dynamiczną ikoną
+        if (id(battery_level).has_state()) {
+          float bat_val = id(battery_level).state;
+
+          if (!isnan(bat_val) && bat_val >= 0 && bat_val <= 100) {
+            char bat[16];
+            snprintf(bat, sizeof(bat), "%.0f%%", bat_val);
+
+            // Dobierz ikonę na podstawie poziomu baterii
+            const char* bat_icon;
+            if (bat_val <= 5) {           // 0-5% -> CRITICAL (3.3V)
+              bat_icon = "\U000F10CD";     // battery-critical
+            } else if (bat_val <= 25) {    // 6-25% -> LOW
+              bat_icon = "\U000F007A";     // battery-low
+            } else if (bat_val <= 60) {    // 26-60% -> MEDIUM
+              bat_icon = "\U000F007E";     // battery-50
+            } else {                       // 61-100% -> HIGH
+              bat_icon = "\U000F0082";     // battery-90
+            }
+
+          // Rysuj ikonę (prawa strona)
+          it.printf(W - PAD, H - 7, id(mdi_micro), GRAY, TextAlign::BOTTOM_RIGHT, "%s", bat_icon);
+
+          // Rysuj procent (przesunięty w lewo od ikony)
+          it.printf(W - PAD - 30, H - 7, id(f_small), GRAY, TextAlign::BOTTOM_RIGHT, "%s", bat);
+          }
+        }
+
+      ESP_LOGI("display", "✅ Render done | SRAM: %d KB",
+               heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
