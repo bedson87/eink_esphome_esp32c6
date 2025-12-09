@@ -542,6 +542,7 @@ font:
       "\U000F0591", # weather-fog
       "\U000F0592", # weather-hail
       "\U000F059E", # weather-windy
+      "\U000F1BE0", # alert-brak danych
     ]
 
   # MDI Icons - małe (prognoza)
@@ -561,6 +562,7 @@ font:
       "\U000F0591", # weather-fog
       "\U000F0592", # weather-hail
       "\U000F059E", # weather-windy
+      "\U000F1BE0", # alert-brak danych
     ]
 
   # MDI Icons - mikro (metryki)
@@ -617,9 +619,9 @@ display:
       const int H = 800;
       const int PAD = 15;
 
-      const int MAIN_ICON_X = 110;   // Ikona pogody nieco bardziej w prawo dla lepszego wyśrodkowania
-      const int MAIN_TEMP_X = 110;   // Temperatura w tej samej osi co ikona
-      const int METRICS_X = 220;     // Metryki bardziej w lewo (było 240)
+      const int MAIN_ICON_X = 95;   // 110 - Ikona pogody nieco bardziej w prawo dla lepszego wyśrodkowania
+      const int MAIN_TEMP_X = 95;   // 110 - Temperatura w tej samej osi co ikona
+      const int METRICS_X = 205;     // 220 - Metryki bardziej w lewo (było 240)
 
       // ZOPTYMALIZOWANE STAŁE DLA KALENDARZA
       const int FORECAST_HEIGHT = 120;
@@ -683,11 +685,11 @@ display:
         if (c == "windy" || c == "windy-variant") return "\U000F059E"; // weather-windy
 
         // EXCEPTIONAL / UNKNOWN - używamy sunny jako fallback
-        if (c == "exceptional" || c == "unknown") return "\U000F0599"; // weather-sunny
+        if (c == "exceptional" || c == "unknown") return "\U000F1BE0"; // icona-alert
 
         // Jeśli nic nie pasuje
-        ESP_LOGW("weather", "Unknown weather condition: '%s' - using sunny fallback", c.c_str());
-        return "\U000F0599"; // weather-sunny jako domyślny
+        ESP_LOGW("weather", "Unknown weather condition: '%s' - using icona-alert", c.c_str());
+        return "\U000F1BE0"; // icona-alert jako domyślny
       };
 
       auto t = id(sntp_time).now();
