@@ -582,10 +582,10 @@ font:
       "\U000F0BC7", # czaszka z kośćmi dla wysokiego poziomu smog
     ]
 
-  # MDI Icons - mikro (metryki)
+# MDI Icons - NOWY ROZMIAR dla LOGO HA (45px)
   - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
-    id: mdi_header
-    size: 33
+    id: mdi_medium
+    size: 45
     glyphs: [
       "\U000F07D0", # home-assistant
     ]
@@ -698,8 +698,8 @@ display:
       int y = PAD;
 
       // ========== NAGŁÓWEK ==========
-      // Ikona HA - wyśrodkowana pionowo z datą
-      it.printf(PAD + 2, y + 4, id(mdi_header), BLACK, "\U000F07D0"); // home-assistant
+      // Ikona HA - POWIĘKSZONA do 45px (mdi_medium) i przesunięta w lewy górny róg
+      it.printf(PAD, y - 5, id(mdi_medium), BLACK, "\U000F07D0"); // home-assistant
 
       // Punkt centrowania przesunięty o +15px w prawo, aby uniknąć kolizji z ikoną
       const int HEADER_CENTER_X = W/2 + 15; 
@@ -758,7 +758,7 @@ display:
 
         // Dobierz ikonę na podstawie poziomu smogu
         const char* smog_icon;
-        if (smog_level == "niski" || smog_level == "średni") {
+        if (smog_level == "niski" || smog_level == "średni" || smog_level == "bardzo niski") {
           smog_icon = "\U000F0BC8";     // skull (czaszka)
         } else {
           smog_icon = "\U000F0BC7";     // skull-crossbones (czaszka z kośćmi)
