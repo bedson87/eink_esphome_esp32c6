@@ -442,6 +442,10 @@ text_sensor:
     id: forecast_20
     entity_id: input_text.eink_forecast_20_wu #bez _WU dla wbudowanej integracji
 
+  - platform: homeassistant
+    id: precipitation_forecast
+    entity_id: input_text.eink_precipitation_forecast #dla integracji wunderground
+
   # Kalendarz w 8 liniach
   - platform: homeassistant
     name: "Kalendarz_Linia_1"
@@ -572,6 +576,7 @@ font:
     glyphs: [
       "\U000F058E", # water-percent
       "\U000F029A", # gauge
+      "\U000F054B", # umbrella - opady
       "\U000F059E", # weather-windy
 ###      "\U000F0D43", # air-filter
       "\U000F0082", # battery-90
@@ -619,15 +624,14 @@ display:
       const int H = 800;
       const int PAD = 15;
 
-      const int MAIN_ICON_X = 95;   // 110 - Ikona pogody nieco bardziej w prawo dla lepszego wyśrodkowania
-      const int MAIN_TEMP_X = 95;   // 110 - Temperatura w tej samej osi co ikona
-      const int METRICS_X = 205;     // 220 - Metryki bardziej w lewo (było 240)
+      const int MAIN_ICON_X = 95;
+      const int MAIN_TEMP_X = 95;
+      const int METRICS_X = 205;
 
-      // ZOPTYMALIZOWANE STAŁE DLA KALENDARZA
       const int FORECAST_HEIGHT = 120;
       const int CALENDAR_Y_START_OFFSET = 5;
-      const int CALENDAR_LINE_HEIGHT = 45;  // Zwiększone z 30 (więcej miejsca po tytule)
-      const int LINE_SPACING = 24;          // Zwiększone z 22 (większy odstęp między wydarzeniami)
+      const int CALENDAR_LINE_HEIGHT = 45;
+      const int LINE_SPACING = 24;
 
       const auto BLACK = Color(255, 255, 255);
       const auto WHITE = Color(0, 0, 0);
@@ -649,47 +653,26 @@ display:
         return {"unknown", 0.0};
       };
 
-      // --- 2. FUNKCJA DOBIERAJĄCA IKONY (POPRAWIONE KODY MDI) ---
+      // --- 2. FUNKCJA DOBIERAJĄCA IKONY ---
       auto get_icon = [](const std::string &c) -> const char* {
-        // CLEAR (bezchmurnie)
-        if (c == "sunny" || c == "clear-day") return "\U000F0599"; // weather-sunny
-        if (c == "clear-night") return "\U000F0594"; // weather-night
-
-        // PARTLY CLOUDY (częściowe zachmurzenie) - używamy cloudy
+        if (c == "sunny" || c == "clear-day") return "\U000F0599";
+        if (c == "clear-night") return "\U000F0594";
         if (c == "partlycloudy" || c == "partly-cloudy-day" || c == "partly-cloudy-night") {
-          return "\U000F0590"; // weather-cloudy
+          return "\U000F0590";
         }
-
-        // CLOUDY (pochmurno)
-        if (c == "cloudy") return "\U000F0590"; // weather-cloudy
-
-        // FOG/HAZE (mgła/zamglenie)
-        if (c == "fog" || c == "hazy") return "\U000F0591"; // weather-fog
-
-        // RAIN (deszcz)
-        if (c == "rainy") return "\U000F0597"; // weather-rainy
-        if (c == "pouring") return "\U000F0596"; // weather-pouring
-
-        // LIGHTNING (burza)
-        if (c == "lightning") return "\U000F0593"; // weather-lightning
-        if (c == "lightning-rainy" || c == "thunderstorm") return "\U000F067E"; // weather-lightning-rainy
-
-        // SNOW (śnieg)
-        if (c == "snowy") return "\U000F0598"; // weather-snowy
-        if (c == "snowy-rainy") return "\U000F067F"; // weather-snowy-rainy
-
-        // HAIL (grad)
-        if (c == "hail") return "\U000F0592"; // weather-hail
-
-        // WIND (wiatr)
-        if (c == "windy" || c == "windy-variant") return "\U000F059E"; // weather-windy
-
-        // EXCEPTIONAL / UNKNOWN - używamy sunny jako fallback
-        if (c == "exceptional" || c == "unknown") return "\U000F1BE0"; // icona-alert
-
-        // Jeśli nic nie pasuje
+        if (c == "cloudy") return "\U000F0590";
+        if (c == "fog" || c == "hazy") return "\U000F0591";
+        if (c == "rainy") return "\U000F0597";
+        if (c == "pouring") return "\U000F0596";
+        if (c == "lightning") return "\U000F0593";
+        if (c == "lightning-rainy" || c == "thunderstorm") return "\U000F067E";
+        if (c == "snowy") return "\U000F0598";
+        if (c == "snowy-rainy") return "\U000F067F";
+        if (c == "hail") return "\U000F0592";
+        if (c == "windy" || c == "windy-variant") return "\U000F059E";
+        if (c == "exceptional" || c == "unknown") return "\U000F1BE0";
         ESP_LOGW("weather", "Unknown weather condition: '%s' - using icona-alert", c.c_str());
-        return "\U000F1BE0"; // icona-alert jako domyślny
+        return "\U000F1BE0";
       };
 
       auto t = id(sntp_time).now();
@@ -698,17 +681,14 @@ display:
       int y = PAD;
 
       // ========== NAGŁÓWEK ==========
-      // Ikona HA - POWIĘKSZONA do 45px (mdi_medium) i przesunięta w lewy górny róg
-      it.printf(PAD, y - 5, id(mdi_medium), BLACK, "\U000F07D0"); // home-assistant
+      it.printf(PAD, y - 5, id(mdi_medium), BLACK, "\U000F07D0");
 
-      // Punkt centrowania przesunięty o +15px w prawo, aby uniknąć kolizji z ikoną
       const int HEADER_CENTER_X = W/2 + 15; 
 
       char date[64];
       snprintf(date, sizeof(date), "%02d.%02d.%04d %s",
                t.day_of_month, t.month, t.year, dni[t.day_of_week - 1]);
       
-      // Zastosowanie nowego, przesuniętego punktu centrowania
       it.printf(HEADER_CENTER_X, y, id(f_header), BLACK, TextAlign::TOP_CENTER, "%s", date);
 
       y += 45;
@@ -718,55 +698,59 @@ display:
       // ========== SEKCJA GŁÓWNA: IKONA + TEMP + METRYKI ==========
       int main_y = y;
 
-      // LEWA: Ikona + temperatura (ZWARTE - zbliżone do środka bloku)
+      // LEWA: Ikona + temperatura (przesunięte lekko wyżej dla lepszego wyrównania)
       if (id(weather_state).has_state()) {
         std::string ws = std::string(id(weather_state).state.c_str());
         ESP_LOGI("weather", "Main weather state: '%s'", ws.c_str());
-        // Ikona niżej (Y=60 zamiast 50) - bardziej w centrum bloku
-        it.printf(MAIN_ICON_X, main_y + 60, id(mdi_large), BLACK, TextAlign::CENTER, "%s", get_icon(ws));
+        it.printf(MAIN_ICON_X, main_y + 70, id(mdi_large), BLACK, TextAlign::CENTER, "%s", get_icon(ws));
       }
 
       if (id(temp).has_state()) {
         char tmp[16];
         snprintf(tmp, sizeof(tmp), "%.0f°C", id(temp).state);
-        // Temperatura wyżej (Y=150 zamiast 160) - bliżej ikony
-        it.printf(MAIN_TEMP_X, main_y + 150, id(f_big), BLACK, TextAlign::CENTER, "%s", tmp);
+        it.printf(MAIN_TEMP_X, main_y + 160, id(f_big), BLACK, TextAlign::CENTER, "%s", tmp);
       }
 
-      // PRAWA: Metryki (IKONY WYRÓWNANE z baseline tekstu)
+      // PRAWA: Metryki - zaczynamy DUŻO wyżej dla wyrównania z ikoną
       int met_x = METRICS_X;
-      int met_y = main_y + 40;  // Start wyżej (było 50)
+      int met_y = main_y + 35;  // Start WYŻEJ (było 65 - teraz mniejsza liczba = wyżej!)
+
+      // NOWA LINIA: Prognoza opadów (2h)
+      if (id(precipitation_forecast).has_state()) {
+        float precip_val = atof(id(precipitation_forecast).state.c_str());
+        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F054B"); // umbrella
+        it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Opady (2h): %.1f mm", precip_val);
+        met_y += 28;
+      }
 
       if (id(humidity).has_state()) {
-        // Ikona wyrównana z tekstem (lekko w górę dla baseline alignment)
-        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F058E"); // water-percent
+        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F058E");
         it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Wilgotność: %.0f%%", id(humidity).state);
-        met_y += 32;
+        met_y += 28;
       }
       if (id(pressure).has_state()) {
-        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F029A"); // gauge
+        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F029A");
         it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Ciśnienie: %.0f hPa", id(pressure).state);
-        met_y += 32;
+        met_y += 28;
       }
       if (id(wind).has_state()) {
-        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F059E"); // weather-windy
+        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F059E");
         it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Wiatr: %.1f km/h", id(wind).state);
-        met_y += 32;
+        met_y += 28;
       }
       if (id(air_quality).has_state()) {
         std::string smog_level = id(air_quality).state.c_str();
 
-        // Dobierz ikonę na podstawie poziomu smogu
         const char* smog_icon;
         if (smog_level == "niski" || smog_level == "średni" || smog_level == "bardzo niski") {
-          smog_icon = "\U000F0BC8";     // skull (czaszka)
+          smog_icon = "\U000F0BC8";
         } else {
-          smog_icon = "\U000F0BC7";     // skull-crossbones (czaszka z kośćmi)
+          smog_icon = "\U000F0BC7";
         }
 
         it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "%s", smog_icon);
         it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Smog: %s", smog_level.c_str());
-        met_y += 32;
+        met_y += 28;
       }
 
       y = main_y + 220;
@@ -801,7 +785,6 @@ display:
         draw_hour(W - col/2, fc_y, "20:00", id(forecast_20).get_state());
       }
 
-      // WYZNACZENIE PUNKTU STARTOWEGO KALENDARZA
       int CALENDAR_Y_START = fc_y + FORECAST_HEIGHT + CALENDAR_Y_START_OFFSET;
 
       it.line(PAD, CALENDAR_Y_START, W - PAD, CALENDAR_Y_START, LINE);
@@ -812,37 +795,29 @@ display:
 
       ESP_LOGI("display", "✏️ Starting Calendar block at Y=%d", current_y);
 
-      // TYTUŁ (POGRUBIONY)
       it.printf(PAD, current_y, id(f_header), BLACK, "KALENDARZ:");
       current_y += CALENDAR_LINE_HEIGHT;
 
-      // Funkcja pomocnicza: Sprawdza czy wydarzenie jest dzisiaj
       auto is_today = [&t](const std::string &line) -> bool {
         if (line.empty()) return false;
 
-        // Format linii: "Sob 29.11 12:30 – Wydarzenie" lub "Sob 29.11 – Wydarzenie"
-        // Wyciągamy dzień i miesiąc z linii
         size_t space_pos = line.find(' ');
         if (space_pos == std::string::npos) return false;
 
-        std::string date_part = line.substr(space_pos + 1);  // "29.11 ..."
+        std::string date_part = line.substr(space_pos + 1);
 
-        // Wyciągnij dzień (przed pierwszą kropką)
         size_t dot_pos = date_part.find('.');
         if (dot_pos == std::string::npos) return false;
 
         int event_day = atoi(date_part.substr(0, dot_pos).c_str());
 
-        // Wyciągnij miesiąc (między kropkami)
         size_t second_dot = date_part.find('.', dot_pos + 1);
         if (second_dot == std::string::npos) {
-          // Próbujemy znaleźć spację (dla formatu bez godziny)
           second_dot = date_part.find(' ', dot_pos + 1);
         }
 
         int event_month = atoi(date_part.substr(dot_pos + 1, second_dot - dot_pos - 1).c_str());
 
-        // Porównaj z dzisiejszą datą
         return (event_day == t.day_of_month && event_month == t.month);
       };
 
@@ -933,33 +908,28 @@ display:
                t.day_of_month, t.month, t.year, t.hour, t.minute);
       it.printf(PAD, H - 7, id(f_small), GRAY, TextAlign::BOTTOM_LEFT, "%s", upd);
 
-      // Wyświetl baterię z dynamiczną ikoną
-        if (id(battery_level).has_state()) {
-          float bat_val = id(battery_level).state;
+      if (id(battery_level).has_state()) {
+        float bat_val = id(battery_level).state;
 
-          if (!isnan(bat_val) && bat_val >= 0 && bat_val <= 100) {
-            char bat[16];
-            snprintf(bat, sizeof(bat), "%.0f%%", bat_val);
+        if (!isnan(bat_val) && bat_val >= 0 && bat_val <= 100) {
+          char bat[16];
+          snprintf(bat, sizeof(bat), "%.0f%%", bat_val);
 
-            // Dobierz ikonę na podstawie poziomu baterii
-            const char* bat_icon;
-            if (bat_val <= 5) {           // 0-5% -> CRITICAL (3.3V)
-              bat_icon = "\U000F10CD";     // battery-critical
-            } else if (bat_val <= 25) {    // 6-25% -> LOW
-              bat_icon = "\U000F007A";     // battery-low
-            } else if (bat_val <= 60) {    // 26-60% -> MEDIUM
-              bat_icon = "\U000F007E";     // battery-50
-            } else {                       // 61-100% -> HIGH
-              bat_icon = "\U000F0082";     // battery-90
-            }
-
-          // Rysuj ikonę (prawa strona)
-          it.printf(W - PAD, H - 7, id(mdi_micro), GRAY, TextAlign::BOTTOM_RIGHT, "%s", bat_icon);
-
-          // Rysuj procent (przesunięty w lewo od ikony)
-          it.printf(W - PAD - 30, H - 7, id(f_small), GRAY, TextAlign::BOTTOM_RIGHT, "%s", bat);
+          const char* bat_icon;
+          if (bat_val <= 5) {
+            bat_icon = "\U000F10CD";
+          } else if (bat_val <= 25) {
+            bat_icon = "\U000F007A";
+          } else if (bat_val <= 60) {
+            bat_icon = "\U000F007E";
+          } else {
+            bat_icon = "\U000F0082";
           }
+
+          it.printf(W - PAD, H - 7, id(mdi_micro), GRAY, TextAlign::BOTTOM_RIGHT, "%s", bat_icon);
+          it.printf(W - PAD - 30, H - 7, id(f_small), GRAY, TextAlign::BOTTOM_RIGHT, "%s", bat);
         }
+      }
 
       ESP_LOGI("display", "✅ Render done | SRAM: %d KB",
                heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
