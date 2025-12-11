@@ -59,7 +59,7 @@ Projekt wykorzystuje **ESPHome** do komunikacji z HA. Dane są wstępnie przygot
 
 | Ramka przód | Ramka tył |
 | :---: | :---:
-| ![Zdjęcie finalnej ramki](ramka.png) | ![Zdjęcie finalnej ramki tył](ramka_tyl.jpg)
+| ![Zdjęcie finalnej ramki](ramka.jpg) | ![Zdjęcie finalnej ramki tył](ramka_tyl.jpg)
 
 ---
 
