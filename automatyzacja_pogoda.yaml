@@ -1,4 +1,4 @@
-alias: ESP E-ink - Aktualizuj prognozę pogody - integracja wundeground
+alias: ESP E-ink - Aktualizuj prognozę pogody - wundeground
 description: >-
   Pobiera godzinową prognozę pogody. Jeśli prognoza na daną godzinę minęła,
   używa aktualnego stanu pogody.
@@ -69,6 +69,20 @@ actions:
             unknown|0
           {% endif %}
         {% endif %}
+      precipitation_2h: >
+        {% set now_ts = now().timestamp() %} {% set forecast_2h = raw_data 
+          | selectattr('datetime', 'defined')
+          | map(attribute='datetime')
+          | map('as_datetime')
+          | select('>', now())
+          | list %}
+        {% set total_precip = namespace(sum=0) %} {% for entry in raw_data if
+        entry.datetime is defined %}
+          {% set entry_time = entry.datetime | as_datetime %}
+          {% if entry_time > now() and entry_time <= now() + timedelta(hours=2) %}
+            {% set total_precip.sum = total_precip.sum + (entry.precipitation | float(0)) %}
+          {% endif %}
+        {% endfor %} {{ "%.1f" | format(total_precip.sum) }}
   - data:
       entity_id: input_text.eink_forecast_12_wu
       value: "{{ forecast_12 }}"
@@ -80,5 +94,9 @@ actions:
   - data:
       entity_id: input_text.eink_forecast_20_wu
       value: "{{ forecast_20 }}"
+    action: input_text.set_value
+  - data:
+      entity_id: input_text.eink_precipitation_forecast
+      value: "{{ precipitation_2h }}"
     action: input_text.set_value
 mode: single
