@@ -640,17 +640,29 @@ display:
 
       it.fill(WHITE);
 
-      // --- 1. FUNKCJA PARSUJĄCA POGODĘ ---
-      auto parse_forecast = [](const std::string &s) -> std::pair<std::string, float> {
-        size_t pos = s.find('|');
-        if (pos != std::string::npos) {
-          std::string cond = s.substr(0, pos);
-          cond.erase(0, cond.find_first_not_of(" \n\r\t"));
-          cond.erase(cond.find_last_not_of(" \n\r\t") + 1);
-          float temp = atof(s.substr(pos + 1).c_str());
-          return {cond, temp};
+      // --- 1. FUNKCJA PARSUJĄCA POGODĘ Z DYNAMICZNĄ GODZINĄ ---
+      auto parse_forecast_with_time = [](const std::string &s) -> std::tuple<std::string, std::string, float> {
+        size_t first_pipe = s.find('|');
+        if (first_pipe == std::string::npos) {
+          return {"--:--", "unknown", 0.0};
         }
-        return {"unknown", 0.0};
+        
+        std::string time_label = s.substr(0, first_pipe);
+        time_label.erase(0, time_label.find_first_not_of(" \n\r\t"));
+        time_label.erase(time_label.find_last_not_of(" \n\r\t") + 1);
+        
+        size_t second_pipe = s.find('|', first_pipe + 1);
+        if (second_pipe == std::string::npos) {
+          return {time_label, "unknown", 0.0};
+        }
+        
+        std::string cond = s.substr(first_pipe + 1, second_pipe - first_pipe - 1);
+        cond.erase(0, cond.find_first_not_of(" \n\r\t"));
+        cond.erase(cond.find_last_not_of(" \n\r\t") + 1);
+        
+        float temp = atof(s.substr(second_pipe + 1).c_str());
+        
+        return {time_label, cond, temp};
       };
 
       // --- 2. FUNKCJA DOBIERAJĄCA IKONY ---
@@ -658,7 +670,7 @@ display:
         if (c == "sunny" || c == "clear-day") return "\U000F0599";
         if (c == "clear-night") return "\U000F0594";
         if (c == "partlycloudy" || c == "partly-cloudy-day" || c == "partly-cloudy-night") {
-          return "\U000F0590";
+          return "\U000F0595";
         }
         if (c == "cloudy") return "\U000F0590";
         if (c == "fog" || c == "hazy") return "\U000F0591";
@@ -671,7 +683,7 @@ display:
         if (c == "hail") return "\U000F0592";
         if (c == "windy" || c == "windy-variant") return "\U000F059E";
         if (c == "exceptional" || c == "unknown") return "\U000F1BE0";
-        ESP_LOGW("weather", "Unknown weather condition: '%s' - using icona-alert", c.c_str());
+        ESP_LOGW("weather", "Unknown weather condition: '%s' - using icon-alert", c.c_str());
         return "\U000F1BE0";
       };
 
@@ -681,7 +693,7 @@ display:
       int y = PAD;
 
       // ========== NAGŁÓWEK ==========
-      it.printf(PAD, y - 5, id(mdi_medium), BLACK, "\U000F07D0");
+      it.printf(PAD - 5, y - 5, id(mdi_medium), BLACK, "\U000F07D0");
 
       const int HEADER_CENTER_X = W/2 + 15; 
 
@@ -698,7 +710,7 @@ display:
       // ========== SEKCJA GŁÓWNA: IKONA + TEMP + METRYKI ==========
       int main_y = y;
 
-      // LEWA: Ikona + temperatura (przesunięte lekko wyżej dla lepszego wyrównania)
+      // LEWA: Ikona + temperatura
       if (id(weather_state).has_state()) {
         std::string ws = std::string(id(weather_state).state.c_str());
         ESP_LOGI("weather", "Main weather state: '%s'", ws.c_str());
@@ -711,14 +723,14 @@ display:
         it.printf(MAIN_TEMP_X, main_y + 160, id(f_big), BLACK, TextAlign::CENTER, "%s", tmp);
       }
 
-      // PRAWA: Metryki - zaczynamy DUŻO wyżej dla wyrównania z ikoną
+      // PRAWA: Metryki
       int met_x = METRICS_X;
-      int met_y = main_y + 35;  // Start WYŻEJ (było 65 - teraz mniejsza liczba = wyżej!)
+      int met_y = main_y + 35;
 
-      // NOWA LINIA: Prognoza opadów (2h)
+      // Prognoza opadów (2h)
       if (id(precipitation_forecast).has_state()) {
         float precip_val = atof(id(precipitation_forecast).state.c_str());
-        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F054B"); // umbrella
+        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F054B");
         it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Opady (2h): %.1f mm", precip_val);
         met_y += 28;
       }
@@ -757,15 +769,17 @@ display:
       it.line(PAD, y, W - PAD, y, LINE);
       y += 15;
 
-      // ========== PROGNOZA GODZINOWA ==========
-      auto draw_hour = [&](int x, int yy, const char* label, const std::string &fc_str) {
-        auto [cond, temp] = parse_forecast(fc_str);
-        ESP_LOGI("weather", "Forecast %s: condition='%s', temp=%.1f", label, cond.c_str(), temp);
+      // ========== PROGNOZA GODZINOWA - DYNAMICZNA CO 2H ==========
+      auto draw_hour_dynamic = [&](int x, int yy, const std::string &fc_str) {
+        auto [time_label, cond, temp] = parse_forecast_with_time(fc_str);
+        
+        ESP_LOGI("weather", "Forecast %s: condition='%s', temp=%.1f", 
+                 time_label.c_str(), cond.c_str(), temp);
 
         const int ICON_Y = yy + 55;
         const int TEMP_Y = yy + 85;
 
-        it.printf(x, yy, id(f_normal), BLACK, TextAlign::TOP_CENTER, "%s", label);
+        it.printf(x, yy, id(f_normal), BLACK, TextAlign::TOP_CENTER, "%s", time_label.c_str());
         it.printf(x, ICON_Y, id(mdi_small), BLACK, TextAlign::CENTER, "%s", get_icon(cond));
         char t_str[16];
         snprintf(t_str, sizeof(t_str), "%.0f°C", temp);
@@ -776,13 +790,13 @@ display:
       int col = W / 3;
 
       if (id(forecast_12).has_state()) {
-        draw_hour(col/2, fc_y, "12:00", id(forecast_12).get_state());
+        draw_hour_dynamic(col/2, fc_y, id(forecast_12).get_state());
       }
       if (id(forecast_16).has_state()) {
-        draw_hour(W/2, fc_y, "16:00", id(forecast_16).get_state());
+        draw_hour_dynamic(W/2, fc_y, id(forecast_16).get_state());
       }
       if (id(forecast_20).has_state()) {
-        draw_hour(W - col/2, fc_y, "20:00", id(forecast_20).get_state());
+        draw_hour_dynamic(W - col/2, fc_y, id(forecast_20).get_state());
       }
 
       int CALENDAR_Y_START = fc_y + FORECAST_HEIGHT + CALENDAR_Y_START_OFFSET;
