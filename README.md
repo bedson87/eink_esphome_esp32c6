@@ -48,7 +48,7 @@ Projekt wykorzystuje **ESPHome** do komunikacji z HA. Dane są wstępnie przygot
 
 | Typ Encji | Przykład | Cel |
 | :--- | :--- | :--- |
-| **Text Helper (Pogoda)** | `input_text.eink_forecast_12_wu` | 3 helpery przechowujące prognozę pogody na ustalone godziny (12:00, 16:00, 20:00). |
+| **Text Helper (Pogoda)** | `input_text.eink_forecast_12_wu` | 3 helpery przechowujące prognozę pogody na najbliższe godziny (+1h, +2h, +4h). |
 | **Text Helper (Kalendarz)** | `input_text.kalendarz_e_ink_linia1` | 8 helperów (linii) przechowujących najbliższe wydarzenia z kalendarzy HA. |
 | **Sensor (Jakość Powietrza)** | `sensor.airly_poziom_smogu_pl` | 1 encja pomocnicza z danymi o jakości powietrza (np. z Airly). |
 | **Boolean Helper (Sterowanie)** | `input_boolean.zapobiega_deepsleep_esp_ramka` | Włącznik/wyłącznik do tymczasowego zablokowania wejścia ESP w *deepsleep*. |
