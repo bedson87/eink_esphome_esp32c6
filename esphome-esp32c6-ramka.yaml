@@ -139,32 +139,25 @@ esphome:
                     - logger.log: "✓ Helper OFF - allowing deep sleep"
 
                     - lambda: |-
-                        auto now = id(sntp_time).now();
-                        int current_hour = now.hour;
-                        int current_minute = now.minute;
-                        
-                        ESP_LOGD("main", "Current time: %d:%02d", current_hour, current_minute);
-                        
-                        // Oblicz godzinę po obudzeniu (60 min później)
-                        int wake_hour = current_hour + 1;
-                        if (wake_hour >= 24) wake_hour -= 24;
-                        
-                        ESP_LOGD("main", "Next wake time would be: %d:%02d", wake_hour, current_minute);
+                        ESP_LOGD("main", "Current time: %d:%02d",
+                          id(sntp_time).now().hour,
+                          id(sntp_time).now().minute);
 
                     - delay: 2s
                     
-                    # Decyzja o czasie snu na podstawie PRZYSZŁEJ godziny
+                    # ✅ POPRAWIONA LOGIKA: Sprawdzamy OBECNĄ godzinę z marginesem
+                    # Przedział nocny: 22:00-6:00 (8h marginesu na błędy RTC)
+                    # Przedział dzienny: 6:00-22:00
                     - if:
                         condition:
-                          # Sprawdzamy czy za godzinę będzie noc (21:00-5:00)
                           lambda: |-
-                            int wake_hour = id(sntp_time).now().hour + 1;
-                            if (wake_hour >= 24) wake_hour -= 24;
-                            return (wake_hour >= 21 || wake_hour < 6);
+                            int h = id(sntp_time).now().hour;
+                            // Noc: 22:00-23:59 LUB 0:00-5:59
+                            return (h >= 22 || h < 6);
                         then:
                           - logger.log:
-                              format: "🌙 Next wake would be NIGHT (hour: %d) -> Deep sleep 8h"
-                              args: ['(id(sntp_time).now().hour + 1) % 24']
+                              format: "🌙 NIGHT MODE (hour: %d) -> Deep sleep 8h"
+                              args: ['id(sntp_time).now().hour']
                               level: WARN
                           - logger.log: "💤 Entering deep sleep..."
                           - deep_sleep.enter:
@@ -172,8 +165,8 @@ esphome:
                               sleep_duration: 8h
                         else:
                           - logger.log:
-                              format: "☀️ Next wake would be DAY (hour: %d) -> Deep sleep 60min"
-                              args: ['(id(sntp_time).now().hour + 1) % 24']
+                              format: "☀️ DAY MODE (hour: %d) -> Deep sleep 60min"
+                              args: ['id(sntp_time).now().hour']
                               level: WARN
                           - logger.log: "💤 Entering deep sleep..."
                           - deep_sleep.enter:
