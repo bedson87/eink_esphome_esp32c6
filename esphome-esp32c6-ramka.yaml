@@ -1,3 +1,12 @@
+# ===========================================
+#  ZMIENNA GLOBALNA - TRYB AWARYJNY
+# ===========================================
+globals:
+  - id: emergency_mode_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
 esphome:
   name: esp32-c6-1
   friendly_name: esp32-c6-1
@@ -10,10 +19,10 @@ esphome:
         - output.turn_off: gpio_rf_enable  # GPIO03 LOW (Enable RF switch)
         - delay: 10ms
         - output.turn_on: gpio_ant_select  # GPIO14 HIGH (Select external)
-        - delay: 50ms  # ✅ Delay dla stabilizacji
+        - delay: 50ms
         - logger.log: "✅ External antenna active"
 
-    # 2. DOTYCHCZASOWA LOGIKA STARTOWA (Priorytet -10.0)
+    # 2. GŁÓWNA LOGIKA STARTOWA (Priorytet -10.0)
     - priority: -10.0
       then:
         - logger.log:
@@ -120,10 +129,38 @@ esphome:
             condition:
               lambda: 'return !id(preventdeepsleep_set).has_state();'
             then:
+              # ❌ BRAK POŁĄCZENIA Z HA - TRYB AWARYJNY
               - logger.log:
-                  format: "⚠️ WARNING: Helper has no state - BLOCKING deep sleep!"
+                  format: "⚠️ WARNING: Helper has no state - EMERGENCY MODE!"
                   level: ERROR
+              
+              # Ustaw flagę trybu awaryjnego
+              - globals.set:
+                  id: emergency_mode_active
+                  value: 'true'
+              
+              - logger.log: "🚨 Emergency mode enabled - rendering screen..."
+              
+              # Wywołaj update ekranu (lambda w display: sprawdzi flagę)
+              - component.update: epaper
+              
+              - delay: 10s  # Daj czas na wyświetlenie
+              
+              - logger.log:
+                  format: "💤 Emergency sleep 10 minutes..."
+                  level: WARN
+              
+              - deep_sleep.enter:
+                  id: deep_sleep_component
+                  sleep_duration: 10min
+                  
             else:
+              # ✅ NORMALNA LOGIKA - HELPER DOSTĘPNY
+              # Wyłącz tryb awaryjny (na wszelki wypadek)
+              - globals.set:
+                  id: emergency_mode_active
+                  value: 'false'
+              
               - logger.log:
                   format: "✓ Helper state: %s"
                   args: ['id(preventdeepsleep_set).state ? "ON (block sleep)" : "OFF (allow sleep)"']
@@ -145,14 +182,11 @@ esphome:
 
                     - delay: 2s
                     
-                    # ✅ POPRAWIONA LOGIKA: Sprawdzamy OBECNĄ godzinę z marginesem
-                    # Przedział nocny: 22:00-6:00 (8h marginesu na błędy RTC)
-                    # Przedział dzienny: 6:00-22:00
+                    # Sprawdzamy OBECNĄ godzinę z marginesem
                     - if:
                         condition:
                           lambda: |-
                             int h = id(sntp_time).now().hour;
-                            // Noc: 22:00-23:59 LUB 0:00-5:59
                             return (h >= 22 || h < 6);
                         then:
                           - logger.log:
@@ -172,6 +206,8 @@ esphome:
                           - deep_sleep.enter:
                               id: deep_sleep_component
                               sleep_duration: 60min
+                    
+                
 # ===========================================
 #  ESP32-C6 CONFIG - XIAO OPTIMIZED
 # ===========================================
@@ -195,11 +231,11 @@ esp32:
 
 api:
   encryption:
-    key: "XXXXXXXXXXX"
+    key: "XXXXXXXXX"
 
 ota:
   - platform: esphome
-    password: "XXXXXXXXXXX"
+    password: "XXXXXXXXXXXX"
 
 
 logger:
@@ -542,7 +578,8 @@ font:
     glyphs: [
       "\U000F0599", # weather-sunny
       "\U000F0594", # weather-night
-      "\U000F0590", # weather-cloudy (użyjemy dla partly-cloudy też)
+      "\U000F0590", # weather-cloudy
+      "\U000F0595", # partly-cloudy
       "\U000F0597", # weather-rainy
       "\U000F0596", # weather-pouring
       "\U000F0593", # weather-lightning
@@ -553,6 +590,7 @@ font:
       "\U000F0592", # weather-hail
       "\U000F059E", # weather-windy
       "\U000F1BE0", # alert-brak danych
+      "\U000F05D6", # alert-circle-outline
     ]
 
   # MDI Icons - małe (prognoza)
@@ -562,7 +600,8 @@ font:
     glyphs: [
       "\U000F0599", # weather-sunny
       "\U000F0594", # weather-night
-      "\U000F0590", # weather-cloudy (użyjemy dla partly-cloudy też)
+      "\U000F0590", # weather-cloudy
+      "\U000F0595", # partly-cloudy
       "\U000F0597", # weather-rainy
       "\U000F0596", # weather-pouring
       "\U000F0593", # weather-lightning
@@ -624,6 +663,48 @@ display:
 
 #################### RYSOWANIE ####################
     lambda: |-
+      // ========== SPRAWDZENIE TRYBU AWARYJNEGO ==========
+      if (id(emergency_mode_active)) {
+        ESP_LOGW("display", "🚨 Rendering EMERGENCY screen");
+        
+        const int W = 480;
+        const int H = 800;
+        const auto BLACK = Color(255, 255, 255);
+        const auto WHITE = Color(0, 0, 0);
+        const auto GRAY = Color(170, 170, 170);
+        
+        it.fill(WHITE);
+        
+        // Duża ikona alert-circle-outline
+        it.printf(W/2, H/2 - 100, id(mdi_large), BLACK, 
+                  TextAlign::CENTER, "\U000F05D6");
+        
+        // Tekst główny
+        it.printf(W/2, H/2 + 60, id(f_header), BLACK, 
+                  TextAlign::CENTER, "BRAK POŁĄCZENIA");
+        
+        // Info o ponownej próbie
+        it.printf(W/2, H/2 + 120, id(f_normal), GRAY, 
+                  TextAlign::CENTER, "Ponowna próba za 10 min");
+        
+        // Timestamp ostatniej próby
+        auto t = id(sntp_time).now();
+        if (t.is_valid()) {
+          char time_str[64];
+          snprintf(time_str, sizeof(time_str), "Ostatnia próba: %02d:%02d", 
+                   t.hour, t.minute);
+          it.printf(W/2, H - 50, id(f_small), GRAY, 
+                    TextAlign::CENTER, "%s", time_str);
+        } else {
+          it.printf(W/2, H - 50, id(f_small), GRAY, 
+                    TextAlign::CENTER, "Brak synchronizacji czasu");
+        }
+        
+        ESP_LOGI("display", "✅ Emergency screen rendered");
+        return;  // ← WAŻNE! Nie rysuj normalnego ekranu
+      }
+      
+      // ========== NORMALNY EKRAN ==========
       ESP_LOGI("display", "🖼️ Rendering new layout...");
 
       const int W = 480;
