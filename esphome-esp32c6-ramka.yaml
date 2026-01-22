@@ -231,11 +231,11 @@ esp32:
 
 api:
   encryption:
-    key: "XXXXXXXXX"
+    key: "XXXX"
 
 ota:
   - platform: esphome
-    password: "XXXXXXXXXXXX"
+    password: "XXXX"
 
 
 logger:
