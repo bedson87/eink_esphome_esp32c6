@@ -187,16 +187,16 @@ esphome:
                         condition:
                           lambda: |-
                             int h = id(sntp_time).now().hour;
-                            return (h >= 22 || h < 6);
+                            return (h >= 22 || h < 5);
                         then:
                           - logger.log:
-                              format: "🌙 NIGHT MODE (hour: %d) -> Deep sleep 8h"
+                              format: "🌙 NIGHT MODE (hour: %d) -> Deep sleep 7h"
                               args: ['id(sntp_time).now().hour']
                               level: WARN
                           - logger.log: "💤 Entering deep sleep..."
                           - deep_sleep.enter:
                               id: deep_sleep_component
-                              sleep_duration: 8h
+                              sleep_duration: 7h
                         else:
                           - logger.log:
                               format: "☀️ DAY MODE (hour: %d) -> Deep sleep 60min"
@@ -454,6 +454,10 @@ sensor:
     entity_id: weather.home #lub .dom dla wbudowanej integracji
     attribute: wind_speed
 
+  - platform: homeassistant
+    id: feels_like
+    entity_id: sensor.home_temperature_feels_like
+
   - platform: uptime
     id: uptime_sensor
     name: "System Uptime"
@@ -630,6 +634,7 @@ font:
       "\U000F10CD", # battery-critical
       "\U000F0BC8", # czaszka dla smog
       "\U000F0BC7", # czaszka z kośćmi dla wysokiego poziomu smog
+      "\U000F10C3", # thermometer-low - temperatura odczuwalna
     ]
 
 # MDI Icons - NOWY ROZMIAR dla LOGO HA (45px)
@@ -812,7 +817,14 @@ display:
 
       // PRAWA: Metryki
       int met_x = METRICS_X;
-      int met_y = main_y + 35;
+      int met_y = main_y + 18;  // ← Przesunięcie wyżej dla nowej metryki
+
+      // Temperatura odczuwalna (NOWA METRYKA NA GÓRZE)
+      if (id(feels_like).has_state()) {
+        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F10C3");
+        it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Odczuwalna: %.0f°C", id(feels_like).state);
+        met_y += 28;
+      }
 
       // Prognoza opadów (2h)
       if (id(precipitation_forecast).has_state()) {
