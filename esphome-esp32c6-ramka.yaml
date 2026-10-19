@@ -1,423 +1,219 @@
-# ===========================================
-#  ZMIENNA GLOBALNA - TRYB AWARYJNY
-# ===========================================
-globals:
-  - id: emergency_mode_active
-    type: bool
-    restore_value: no
-    initial_value: 'false'
+# =====================================================================
+#  esp32-c6-1 - ramka e-ink (XIAO ESP32-C6 + Waveshare 7.5" V2)
+#  Model: HA przygotowuje dane (sensor.e_ink_pogoda, sensor.e_ink_kalendarz),
+#  ramka budzi się, zasysa gotowe atrybuty, rysuje i idzie spać.
+# =====================================================================
+substitutions:
+  # --- sen ---
+  night_start_h: "22"          # od tej godziny noc...
+  night_end_h: "5"             # ...do tej godziny (budzenie o night_end_h:0X)
+  wake_offset_min: "1"         # budź się X min po pełnej godzinie (HA odświeża dane o :00/:30)
+  emergency_sleep_min: "30"    # sen, gdy HA nie odpowiada
+  data_wait_timeout: 20s       # max czekanie na API + czas + helper
+  epaper_wait: 10s             # czas na dokończenie odświeżania e-ink przed snem
+  # --- ekran ---
+  cal_lines_max: "8"           # musi pasować do ev[:8] po stronie HA
+  mdi_font_url: https://github.com/Templarian/MaterialDesign-Webfont/raw/v7.4.47/fonts/materialdesignicons-webfont.ttf
+  text_glyphs: " !\"#%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]_abcdefghijklmnopqrstuvwxyzĄąĆćĘęŁłŃńÓóŚśŹźŻż—–…°"
 
 esphome:
   name: esp32-c6-1
   friendly_name: esp32-c6-1
-
   on_boot:
-    # 1. KONFIGURACJA ANTENY ZEWNĘTRZNEJ (Priorytet 600.0)
-    - priority: 600.0
+    # Antena zewnętrzna - musi być przed startem WiFi
+    - priority: 600
       then:
-        - logger.log: "📡 Switching to EXTERNAL antenna..."
-        - output.turn_off: gpio_rf_enable  # GPIO03 LOW (Enable RF switch)
-        - delay: 10ms
-        - output.turn_on: gpio_ant_select  # GPIO14 HIGH (Select external)
-        - delay: 50ms
-        - logger.log: "✅ External antenna active"
-
-    # 2. GŁÓWNA LOGIKA STARTOWA (Priorytet -10.0)
-    - priority: -10.0
+        - output.turn_off: gpio_rf_enable   # GPIO3 LOW  = włącz przełącznik RF
+        - output.turn_on: gpio_ant_select   # GPIO14 HIGH = antena zewnętrzna
+    # Główna logika po starcie systemu
+    - priority: -10
       then:
-        - logger.log:
-            format: "=== 🚀 XIAO ESP32-C6 START (4MB Flash + 512KB SRAM) ==="
-            level: WARN
+        - script.execute: wake_cycle
 
-        - lambda: |-
-            // ESP32-C6 ma tylko wewnętrzną SRAM (bez PSRAM)
-            uint32_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-            uint32_t total_internal = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
-
-            ESP_LOGI("main", "💾 Całkowita SRAM: %d KB", total_internal / 1024);
-            ESP_LOGI("main", "💾 Wolna SRAM: %d KB", free_internal / 1024);
-
-            // Odczyt powodu restartu
-            esp_reset_reason_t reason = esp_reset_reason();
-            const char* reason_str;
-            switch(reason) {
-              case ESP_RST_POWERON: reason_str = "Power-on"; break;
-              case ESP_RST_SW: reason_str = "Software reset"; break;
-              case ESP_RST_PANIC: reason_str = "Exception/panic"; break;
-              case ESP_RST_INT_WDT: reason_str = "Interrupt watchdog"; break;
-              case ESP_RST_TASK_WDT: reason_str = "Task watchdog"; break;
-              case ESP_RST_WDT: reason_str = "Other watchdog"; break;
-              case ESP_RST_DEEPSLEEP: reason_str = "Deep sleep"; break;
-              case ESP_RST_BROWNOUT: reason_str = "Brownout (LOW VOLTAGE!)"; break;
-              default: reason_str = "Unknown"; break;
-            }
-            ESP_LOGW("main", "🔄 Restart reason: %s", reason_str);
-
-        - wait_until:
-            condition:
-              api.connected:
-            timeout: 30s
-
-        - logger.log: "✅ API connected to Home Assistant"
-
-        - wait_until:
-            condition:
-              lambda: 'return id(sntp_time).now().is_valid();'
-            timeout: 30s
-
-        - logger.log: "✅ Time synchronized"
-
-        - wait_until:
-            condition:
-              lambda: 'return id(preventdeepsleep_set).has_state();'
-            timeout: 30s
-
-        - logger.log: "✅ Helper loaded from HA"
-
-        # Pomiar baterii
-        - logger.log: "🔋 Starting battery measurement..."
-
-        - component.update: battery_voltage_raw
-        - delay: 200ms
-        - component.update: battery_voltage_raw
-        - delay: 200ms
-        - component.update: battery_voltage_raw
-        - delay: 200ms
-        - component.update: battery_level
-        - delay: 300ms
-        - wait_until:
-            condition:
-              lambda: |-
-                return id(battery_level).has_state() &&
-                       !isnan(id(battery_level).state) &&
-                       id(battery_level).state >= 0;
-            timeout: 2s
-        - logger.log: "✅ Battery measurement complete"
-
-        # Czas na odebranie kalendarza z HA
-        - logger.log: "⏳ Waiting 2s for all Calendar lines from HA..."
-        - delay: 2s
-
-        - if:
-            condition:
-              switch.is_on: test_mode_no_display
-            then:
-              - logger.log: "⏩ TEST MODE - Skipping display update"
-            else:
-              - logger.log: "🖼️ Starting e-ink refresh..."
-
-              # Monitoring pamięci przed renderowaniem
-              - lambda: |-
-                  ESP_LOGI("main", "📊 Przed renderowaniem:");
-                  ESP_LOGI("main", "    Free SRAM: %d KB", heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
-
-              - component.update: epaper
-
-              - logger.log: "⏳ Waiting for e-ink to finish (10s max)..."
-              - delay: 10s
-
-              # Monitoring po renderowaniu
-              - lambda: |-
-                  ESP_LOGI("main", "📊 Po renderowaniu:");
-                  ESP_LOGI("main", "    Free SRAM: %d KB", heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
-
-              - logger.log: "✅ Display updated"
-
-        - logger.log: "=== 🌙 Checking deep sleep conditions ==="
-
-        - if:
-            condition:
-              lambda: 'return !id(preventdeepsleep_set).has_state();'
-            then:
-              # ❌ BRAK POŁĄCZENIA Z HA - TRYB AWARYJNY
-              - logger.log:
-                  format: "⚠️ WARNING: Helper has no state - EMERGENCY MODE!"
-                  level: ERROR
-              
-              # Ustaw flagę trybu awaryjnego
-              - globals.set:
-                  id: emergency_mode_active
-                  value: 'true'
-              
-              - logger.log: "🚨 Emergency mode enabled - rendering screen..."
-              
-              # Wywołaj update ekranu (lambda w display: sprawdzi flagę)
-              - component.update: epaper
-              
-              - delay: 10s  # Daj czas na wyświetlenie
-              
-              - logger.log:
-                  format: "💤 Emergency sleep 10 minutes..."
-                  level: WARN
-              
-              - deep_sleep.enter:
-                  id: deep_sleep_component
-                  sleep_duration: 10min
-                  
-            else:
-              # ✅ NORMALNA LOGIKA - HELPER DOSTĘPNY
-              # Wyłącz tryb awaryjny (na wszelki wypadek)
-              - globals.set:
-                  id: emergency_mode_active
-                  value: 'false'
-              
-              - logger.log:
-                  format: "✓ Helper state: %s"
-                  args: ['id(preventdeepsleep_set).state ? "ON (block sleep)" : "OFF (allow sleep)"']
-
-              - if:
-                  condition:
-                    binary_sensor.is_on: preventdeepsleep_set
-                  then:
-                    - logger.log:
-                        format: "🛑 Deep sleep BLOCKED by Home Assistant"
-                        level: WARN
-                  else:
-                    - logger.log: "✓ Helper OFF - allowing deep sleep"
-
-                    - lambda: |-
-                        ESP_LOGD("main", "Current time: %d:%02d",
-                          id(sntp_time).now().hour,
-                          id(sntp_time).now().minute);
-
-                    - delay: 2s
-                    
-                    # Sprawdzamy OBECNĄ godzinę z marginesem
-                    - if:
-                        condition:
-                          lambda: |-
-                            int h = id(sntp_time).now().hour;
-                            return (h >= 22 || h < 5);
-                        then:
-                          - logger.log:
-                              format: "🌙 NIGHT MODE (hour: %d) -> Deep sleep 7h"
-                              args: ['id(sntp_time).now().hour']
-                              level: WARN
-                          - logger.log: "💤 Entering deep sleep..."
-                          - deep_sleep.enter:
-                              id: deep_sleep_component
-                              sleep_duration: 7h
-                        else:
-                          - logger.log:
-                              format: "☀️ DAY MODE (hour: %d) -> Deep sleep 60min"
-                              args: ['id(sntp_time).now().hour']
-                              level: WARN
-                          - logger.log: "💤 Entering deep sleep..."
-                          - deep_sleep.enter:
-                              id: deep_sleep_component
-                              sleep_duration: 60min
-                    
-                
-# ===========================================
-#  ESP32-C6 CONFIG - XIAO OPTIMIZED
-# ===========================================
 esp32:
   board: esp32-c6-devkitc-1
   variant: esp32c6
   flash_size: 4MB
   framework:
     type: esp-idf
-    # Optymalizacja zużycia energii
-    sdkconfig_options:
-      # Power Management
-      CONFIG_PM_ENABLE: "y"
-###      CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80: "y"  # 80MHz zamiast 160MHz
-      # Deep Sleep Optimization
-      CONFIG_ESP_SLEEP_POWER_DOWN_FLASH: "y"
-      CONFIG_ESP_SLEEP_RTC_BUS_ISO_WORKAROUND: "y"
-      # Wyłącz nieużywane peryferia
-      CONFIG_ESP_PHY_REDUCE_TX_POWER: "y"
-
 
 api:
   encryption:
-    key: "XXXX"
+    key: XXXX
 
 ota:
   - platform: esphome
-    password: "XXXX"
-
+    password: XXXX
 
 logger:
   hardware_uart: USB_SERIAL_JTAG
-  baud_rate: 115200
-  level: DEBUG  # WARN Dla testów; potem zmień na ERROR i baud_rate: 0
+  level: INFO
+
+debug:   # powód restartu (m.in. brownout) widoczny w logu i w HA
 
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   fast_connect: true
-  # C6 ma słabszy zasięg - opcjonalnie zwiększ moc TX
-  output_power: 20dB  # Max dla C6
-
-output:
-  - platform: gpio
-    pin: GPIO3
-    id: gpio_rf_enable #do aktywacji anteny zewnetrznej
-    inverted: false
-
-  - platform: gpio
-    pin: GPIO14
-    id: gpio_ant_select #do aktywacji anteny zewnetrznej
-    inverted: false
+  output_power: 20dB
+  # Statyczny IP skraca każde wybudzenie o 1-2 s (brak DHCP) - odkomentuj i dopasuj:
+  # manual_ip:
+  #   static_ip: 192.168.1.50
+  #   gateway: 192.168.1.1
+  #   subnet: 255.255.255.0
+  #   dns1: 192.168.1.1
 
 deep_sleep:
   id: deep_sleep_component
 
+time:
+  - platform: homeassistant     # czas przychodzi razem z API, bez zapytań NTP
+    id: ha_time
+    timezone: Europe/Warsaw
+
+output:
+  - platform: gpio
+    pin: GPIO3
+    id: gpio_rf_enable
+  - platform: gpio
+    pin: GPIO14
+    id: gpio_ant_select
 
 # ===========================================
-#  BUTTONS (Testing & Control)
+#  LOGIKA CYKLU
 # ===========================================
-button:
-  - platform: template
-    name: "🔄 Uruchom on_boot ręcznie"
-    on_press:
-      - logger.log:
-          format: "▶️ Manual on_boot execution"
-          level: WARN
-
+script:
+  # Uśpienie do następnego "okna": pełna godzina + wake_offset_min,
+  # w nocy do night_end_h:0X. Dzięki temu budzenia nie dryfują.
+  - id: go_to_sleep
+    mode: single
+    then:
       - if:
           condition:
-            api.connected:
+            binary_sensor.is_on: preventdeepsleep_set
           then:
-            - logger.log: "✓ API connected"
-          else:
             - logger.log:
-                format: "⚠️ API NOT connected!"
-                level: ERROR
+                format: "Sen zablokowany przez helper w HA"
+                level: WARN
+          else:
+            - deep_sleep.enter:
+                id: deep_sleep_component
+                sleep_duration: !lambda |-
+                  auto t = id(ha_time).now();
+                  if (!t.is_valid()) return (uint32_t) 3600000;
+                  const int now_s = t.hour * 3600 + t.minute * 60 + t.second;
+                  const int off = ${wake_offset_min} * 60;
+                  int next_s;
+                  if (t.hour >= ${night_start_h})      next_s = (24 + ${night_end_h}) * 3600 + off;
+                  else if (t.hour < ${night_end_h})    next_s = ${night_end_h} * 3600 + off;
+                  else                                 next_s = (t.hour + 1) * 3600 + off;
+                  int diff = next_s - now_s;
+                  if (diff <= 0) diff = 3600;
+                  ESP_LOGW("sleep", "Sleeping %d s", diff);
+                  return (uint32_t) diff * 1000UL;
 
+  - id: wake_cycle
+    mode: single
+    then:
+      # 1. Czekamy na to, co krytyczne: API, czas, helper
+      - wait_until:
+          condition:
+            and:
+              - api.connected:
+              - lambda: 'return id(ha_time).now().is_valid() && id(preventdeepsleep_set).has_state();'
+          timeout: ${data_wait_timeout}
+      # reszta stanów z HA dociera tuż po połączeniu
+      - delay: 1500ms
+      # 2. Bateria (16 próbek w jednym update)
+      - component.update: battery_voltage
+      # 3. Brak danych z HA -> ekran awaryjny i krótki sen
       - if:
           condition:
-            lambda: 'return id(sntp_time).now().is_valid();'
-          then:
-            - logger.log: "✓ Time synchronized"
-          else:
-            - logger.log:
-                format: "⚠️ Time NOT synchronized!"
-                level: ERROR
-
-      - delay: 2s
-      - if:
-          condition:
-            lambda: 'return id(preventdeepsleep_set).has_state();'
+            lambda: 'return !(id(ha_time).now().is_valid() && id(preventdeepsleep_set).has_state());'
           then:
             - logger.log:
-                format: "✓ Helper has state: %s"
-                args: ['id(preventdeepsleep_set).state ? "ON" : "OFF"']
-          else:
-            - logger.log:
-                format: "⚠️ Helper has NO state!"
+                format: "Brak danych z HA - ekran awaryjny"
                 level: ERROR
-
-  - platform: template
-    name: "🖼️ Ręczna aktualizacja ekranu"
-    on_press:
+            - display.page.show: page_error
+            - component.update: epaper
+            - delay: ${epaper_wait}
+            - deep_sleep.enter:
+                id: deep_sleep_component
+                sleep_duration: ${emergency_sleep_min}min
+      # 4. Normalny ekran
       - if:
           condition:
             switch.is_on: test_mode_no_display
           then:
-            - logger.log: "⚠️ Cannot refresh - test mode active"
+            - logger.log: "TEST MODE - pomijam odświeżenie ekranu"
           else:
-            - logger.log: "🖼️ Manual display refresh..."
+            - display.page.show: page_main
             - component.update: epaper
+            - delay: ${epaper_wait}
+      # 5. Spać (chyba że helper w HA blokuje)
+      - script.execute: go_to_sleep
 
-  - platform: template
-    name: "💤 Wymuś Deep Sleep 15min"
-    on_press:
-      - logger.log: "Forcing Deep Sleep 15 minutes"
-      - deep_sleep.enter:
-          id: deep_sleep_component
-          sleep_duration: 15min
-
-  - platform: template
-    name: "🛑 Zapobiegaj Deep Sleep"
-    on_press:
-      - logger.log: "Deep Sleep blocked by button"
-      - deep_sleep.prevent: deep_sleep_component
-
-  - platform: template
-    name: "✅ Zezwól na Deep Sleep"
-    on_press:
-      - logger.log: "Deep Sleep allowed"
-      - deep_sleep.allow: deep_sleep_component
-
-  - platform: restart
-    name: "🔄 Restart ESP"
-
+# ===========================================
+#  STEROWANIE
+# ===========================================
 switch:
   - platform: template
     name: "🧪 Tryb testowy (BEZ ekranu)"
     id: test_mode_no_display
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
-    on_turn_on:
-      - logger.log: "⚠️ TEST MODE - Display updates disabled"
-    on_turn_off:
-      - logger.log: "✓ Normal mode - Display updates enabled"
 
-time:
-  - platform: sntp
-    id: sntp_time
-    timezone: Europe/Warsaw
-    servers:
-      - 0.pl.pool.ntp.org
-      - 1.pl.pool.ntp.org
-      - time.google.com
-    on_time_sync:
-      - logger.log:
-          format: "⏰ Time synchronized via SNTP"
-          level: INFO
-
-interval:
-  - interval: 60s
-    then:
-      - if:
-          condition:
-            lambda: 'return !id(sntp_time).now().is_valid();'
-          then:
-            - logger.log:
-                format: "⚠️ BACKUP: on_boot didn't work, trying from interval..."
-                level: WARN
+button:
+  - platform: template
+    name: "🖼️ Ręczna aktualizacja ekranu"
+    on_press:
+      - display.page.show: page_main
+      - component.update: epaper
+  - platform: template
+    name: "💤 Wymuś Deep Sleep 15min"
+    on_press:
+      - deep_sleep.enter:
+          id: deep_sleep_component
+          sleep_duration: 15min
+  - platform: restart
+    name: "🔄 Restart ESP"
 
 binary_sensor:
   - platform: homeassistant
-    name: "Zapobiega deep_sleep"
-    entity_id: input_boolean.zapobiega_deepsleep_esp_ramka
     id: preventdeepsleep_set
-    internal: true
-    on_state:
-      - logger.log:
-          format: "📡 Helper changed state to: %s"
-          args: ['id(preventdeepsleep_set).state ? "ON (block sleep)" : "OFF (allow)"']
-          level: INFO
+    entity_id: input_boolean.zapobiega_deepsleep_esp_ramka
+    on_release:
+      # Helper wyłączony PO zakończeniu cyklu (ramka czuwała) -> idź spać
+      - if:
+          condition:
+            not:
+              script.is_running: wake_cycle
+          then:
+            - script.execute: go_to_sleep
 
+# ===========================================
+#  SENSORY
+# ===========================================
 sensor:
-  # ===========================================
-  #  POMIAR BATERII - XIAO C6 z dzielnikiem
-  # ===========================================
+  # --- bateria: dzielnik 1:1 na GPIO0 ---
   - platform: adc
-    pin: GPIO0  # D0 - dedykowany ADC
+    pin: GPIO0
+    id: battery_voltage
     name: "Napięcie Baterii"
-    id: battery_voltage_raw
-    unit_of_measurement: "V"
-    attenuation: 12db  # 0-3.3V range
+    attenuation: 12db
+    samples: 16
     update_interval: never
     accuracy_decimals: 2
     filters:
-      - multiply: 2.0  # Dzielnik 1:1 (200kΩ + 200kΩ)
-      - sliding_window_moving_average:
-          window_size: 3
-          send_every: 3
-    internal: true
+      - multiply: 2.0
 
-  - platform: template
-    name: "Poziom Baterii"
+  - platform: copy
+    source_id: battery_voltage
     id: battery_level
+    name: "Poziom Baterii"
     unit_of_measurement: "%"
-    icon: "mdi:battery"
+    device_class: battery
     accuracy_decimals: 0
-    lambda: |-
-      return id(battery_voltage_raw).state;
     filters:
       - calibrate_linear:
           method: exact
@@ -427,622 +223,317 @@ sensor:
             - 3.70 -> 40.0
             - 3.90 -> 75.0
             - 4.10 -> 100.0
-      - lambda: |-
-          if (x >= 100) return 100;
-          if (x <= 0) return 0;
-          return x;
-    internal: false
+      - clamp:
+          min_value: 0
+          max_value: 100
 
-  # Home Assistant sensors
+  # --- pogoda: atrybuty sensor.e_ink_pogoda (liczy HA) ---
   - platform: homeassistant
-    id: temp
-    entity_id: weather.home #lub .dom dla wbudowanej integracji
+    id: w_temp
+    entity_id: sensor.e_ink_pogoda
     attribute: temperature
-
   - platform: homeassistant
-    id: pressure
-    entity_id: weather.home #lub .dom dla wbudowanej integracji
-    attribute: pressure
-
+    id: w_feels
+    entity_id: sensor.e_ink_pogoda
+    attribute: feels_like
   - platform: homeassistant
-    id: humidity
-    entity_id: weather.home #lub .dom dla wbudowanej integracji
+    id: w_humidity
+    entity_id: sensor.e_ink_pogoda
     attribute: humidity
-
   - platform: homeassistant
-    id: wind
-    entity_id: weather.home #lub .dom dla wbudowanej integracji
+    id: w_pressure
+    entity_id: sensor.e_ink_pogoda
+    attribute: pressure
+  - platform: homeassistant
+    id: w_wind
+    entity_id: sensor.e_ink_pogoda
     attribute: wind_speed
-
   - platform: homeassistant
-    id: feels_like
-    entity_id: sensor.home_temperature_feels_like
+    id: w_precip
+    entity_id: sensor.e_ink_pogoda
+    attribute: precip_2h
 
-  - platform: uptime
-    id: uptime_sensor
-    name: "System Uptime"
-
-
-# ===========================================
-#  TEXT SENSORS - POGODA GODZINOWA
-# ===========================================
 text_sensor:
+  - platform: debug
+    reset_reason:
+      name: "Powód restartu"
+
   - platform: homeassistant
     id: weather_state
-    entity_id: weather.home #lub .dom dla wbudowanej integracji
-
+    entity_id: sensor.e_ink_pogoda
+    attribute: condition
   - platform: homeassistant
     id: air_quality
-    entity_id: sensor.airly_poziom_smogu_pl
-
-  # Prognoza godzinowa (format: "condition|temperature")
+    entity_id: sensor.e_ink_pogoda
+    attribute: smog
+  # prognoza: "HH:00|condition|temp"
   - platform: homeassistant
-    id: forecast_12
-    entity_id: input_text.eink_forecast_12_wu #bez _WU dla wbudowanej integracji
-
+    id: fc_1
+    entity_id: sensor.e_ink_pogoda
+    attribute: forecast_1
   - platform: homeassistant
-    id: forecast_16
-    entity_id: input_text.eink_forecast_16_wu #bez _WU dla wbudowanej integracji
-
+    id: fc_2
+    entity_id: sensor.e_ink_pogoda
+    attribute: forecast_2
   - platform: homeassistant
-    id: forecast_20
-    entity_id: input_text.eink_forecast_20_wu #bez _WU dla wbudowanej integracji
-
+    id: fc_3
+    entity_id: sensor.e_ink_pogoda
+    attribute: forecast_3
+  # kalendarz: do 8 linii rozdzielonych \n
   - platform: homeassistant
-    id: precipitation_forecast
-    entity_id: input_text.eink_precipitation_forecast #dla integracji wunderground
-
-  # Kalendarz w 8 liniach
-  - platform: homeassistant
-    name: "Kalendarz_Linia_1"
-    id: Kalendarz_Linia_1
-    entity_id: input_text.kalendarz_e_ink_linia1
-    icon: mdi:calendar-today
-
-  - platform: homeassistant
-    name: "Kalendarz_Linia_2"
-    id: Kalendarz_Linia_2
-    entity_id: input_text.kalendarz_e_ink_linia2
-    icon: mdi:calendar-blank-outline
-
-  - platform: homeassistant
-    name: "Kalendarz_Linia_3"
-    id: Kalendarz_Linia_3
-    entity_id: input_text.kalendarz_e_ink_linia3
-    icon: mdi:calendar-blank-outline
-
-  - platform: homeassistant
-    name: "Kalendarz_Linia_4"
-    id: Kalendarz_Linia_4
-    entity_id: input_text.kalendarz_e_ink_linia4
-    icon: mdi:calendar-blank-outline
-
-  - platform: homeassistant
-    name: "Kalendarz_Linia_5"
-    id: Kalendarz_Linia_5
-    entity_id: input_text.kalendarz_e_ink_linia5
-
-  - platform: homeassistant
-    name: "Kalendarz_Linia_6"
-    id: Kalendarz_Linia_6
-    entity_id: input_text.kalendarz_e_ink_linia6
-
-  - platform: homeassistant
-    name: "Kalendarz_Linia_7"
-    id: Kalendarz_Linia_7
-    entity_id: input_text.kalendarz_e_ink_linia7
-
-  - platform: homeassistant
-    name: "Kalendarz_Linia_8"
-    id: Kalendarz_Linia_8
-    entity_id: input_text.kalendarz_e_ink_linia8
+    id: cal_lines
+    entity_id: sensor.e_ink_kalendarz
+    attribute: lines
 
 # ===========================================
-#  SPI - XIAO ESP32-C6 HARDWARE SPI
+#  SPI + WYŚWIETLACZ
 # ===========================================
 spi:
-  clk_pin: GPIO19   # SDIO_CLK (D8/SCK na pinout) ✅
-  mosi_pin: GPIO18   # SDIO_CMD (D10/MOSI na pinout) ✅
-  miso_pin: GPIO20  # SDIO_DATA0 (D9/MISO na pinout) ✅
+  clk_pin: GPIO19
+  mosi_pin: GPIO18
+  miso_pin: GPIO20
 
-# ===========================================
-#  FONTY + MDI ICONS - WERSJA FINALNA
-# ===========================================
 font:
   - file: "gfonts://Roboto@700"
     id: f_big
     size: 60
     glyphs: '0123456789.°C -'
-
   - file: "gfonts://Roboto@700"
     id: f_header
     size: 33
     glyphs: ' .:0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZĄĆĘŁŃÓŚŹŻ—–'
-  # ✅ Usunięte: małe litery, niepotrzebne znaki specjalne
-
   - file: "gfonts://Roboto@400"
     id: f_normal
     size: 26
-    glyphs: ' !"%()+=,\-_.:°/0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzĄąĆćĘęŁłŃńÓóŚśŹźŻż—–'
-
+    glyphs: ${text_glyphs}
   - file: "gfonts://Roboto@400"
     id: f_small
     size: 20
-    glyphs: ' ?!"%()+=,\-_.:°/0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzĄąĆćĘęŁłŃńÓóŚśŹźŻż—–'
-
-  - file: "gfonts://Roboto@700"  # Bold
+    glyphs: ${text_glyphs}
+  - file: "gfonts://Roboto@700"
     id: f_small_bold
     size: 20
-    glyphs: ' ?!"%()+=,\-_.:°/0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzĄąĆćĘęŁłŃńÓóŚśŹźŻż—–'
+    glyphs: ${text_glyphs}
 
-  # MDI Icons - duże (główna pogoda) - TYLKO SPRAWDZONE IKONY
-  - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
+  # MDI - ikony pogody (duże) + alert; ta sama lista używana przez mdi_small
+  - file: ${mdi_font_url}
     id: mdi_large
     size: 120
-    glyphs: [
-      "\U000F0599", # weather-sunny
-      "\U000F0594", # weather-night
-      "\U000F0590", # weather-cloudy
-      "\U000F0595", # partly-cloudy
-      "\U000F0597", # weather-rainy
-      "\U000F0596", # weather-pouring
-      "\U000F0593", # weather-lightning
-      "\U000F067E", # weather-lightning-rainy
-      "\U000F0598", # weather-snowy
-      "\U000F067F", # weather-snowy-rainy
-      "\U000F0591", # weather-fog
-      "\U000F0592", # weather-hail
-      "\U000F059E", # weather-windy
-      "\U000F1BE0", # alert-brak danych
-      "\U000F05D6", # alert-circle-outline
-    ]
-
-  # MDI Icons - małe (prognoza)
-  - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
+    glyphs: &mdi_weather
+      - "\U000F0599"  # sunny
+      - "\U000F0594"  # night
+      - "\U000F0590"  # cloudy
+      - "\U000F0595"  # partly-cloudy
+      - "\U000F0597"  # rainy
+      - "\U000F0596"  # pouring
+      - "\U000F0593"  # lightning
+      - "\U000F067E"  # lightning-rainy
+      - "\U000F0598"  # snowy
+      - "\U000F067F"  # snowy-rainy
+      - "\U000F0591"  # fog
+      - "\U000F0592"  # hail
+      - "\U000F059E"  # windy
+      - "\U000F1BE0"  # alert - brak danych
+      - "\U000F05D6"  # alert-circle-outline
+  - file: ${mdi_font_url}
     id: mdi_small
     size: 60
-    glyphs: [
-      "\U000F0599", # weather-sunny
-      "\U000F0594", # weather-night
-      "\U000F0590", # weather-cloudy
-      "\U000F0595", # partly-cloudy
-      "\U000F0597", # weather-rainy
-      "\U000F0596", # weather-pouring
-      "\U000F0593", # weather-lightning
-      "\U000F067E", # weather-lightning-rainy
-      "\U000F0598", # weather-snowy
-      "\U000F067F", # weather-snowy-rainy
-      "\U000F0591", # weather-fog
-      "\U000F0592", # weather-hail
-      "\U000F059E", # weather-windy
-      "\U000F1BE0", # alert-brak danych
-    ]
-
-  # MDI Icons - mikro (metryki)
-  - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
+    glyphs: *mdi_weather
+  - file: ${mdi_font_url}
     id: mdi_micro
     size: 24
-    glyphs: [
-      "\U000F058E", # water-percent
-      "\U000F029A", # gauge
-      "\U000F054B", # umbrella - opady
-      "\U000F059E", # weather-windy
-###      "\U000F0D43", # air-filter
-      "\U000F0082", # battery-90
-      "\U000F007E", # battery-50
-      "\U000F007A", # battery-low
-      "\U000F10CD", # battery-critical
-      "\U000F0BC8", # czaszka dla smog
-      "\U000F0BC7", # czaszka z kośćmi dla wysokiego poziomu smog
-      "\U000F10C3", # thermometer-low - temperatura odczuwalna
-    ]
-
-# MDI Icons - NOWY ROZMIAR dla LOGO HA (45px)
-  - file: 'https://github.com/Templarian/MaterialDesign-Webfont/raw/master/fonts/materialdesignicons-webfont.ttf'
+    glyphs:
+      - "\U000F058E"  # water-percent
+      - "\U000F029A"  # gauge
+      - "\U000F054B"  # umbrella
+      - "\U000F059E"  # windy
+      - "\U000F0082"  # battery-90
+      - "\U000F007E"  # battery-50
+      - "\U000F007A"  # battery-low
+      - "\U000F10CD"  # battery-critical
+      - "\U000F0BC8"  # smog niski
+      - "\U000F0BC7"  # smog wysoki
+      - "\U000F10C3"  # thermometer-low (odczuwalna)
+  - file: ${mdi_font_url}
     id: mdi_medium
     size: 45
-    glyphs: [
-      "\U000F07D0", # home-assistant
-    ]
+    glyphs:
+      - "\U000F07D0"  # home-assistant
 
-# ===========================================
-#  E-INK DISPLAY - XIAO C6 PINOUT
-# ===========================================
 display:
   - platform: waveshare_epaper
     id: epaper
     model: 7.50inV2p
-    cs_pin: GPIO21    # SDIO_DATA1 - Chip Select
-    dc_pin: GPIO22    # SDIO_DATA2 - Data/Command
-    reset_pin: GPIO23 # SDIO_DATA3 - Reset
-    
-    # ✅ BUSY na GPIO2 (D2/A2) - przednia strona, ADC-capable ale nie koliduje
+    cs_pin: GPIO21
+    dc_pin: GPIO22
+    reset_pin: GPIO23
     busy_pin:
-      number: GPIO2   # D2 (przód płytki) - Busy signal
-      inverted: true  # Dla Waveshare Rev 2
-
-    full_update_every: 30
+      number: GPIO2
+      inverted: true
+    full_update_every: 30    # po deep sleep i tak każdy refresh jest pełny
     reset_duration: 2ms
     update_interval: never
-    rotation: 90  # Układ pionowy (480x800)
+    rotation: 90             # pionowo 480x800
+    pages:
+      # ---------------------------------------------------------------
+      - id: page_main
+        lambda: |-
+          const int W = 480;
+          const int H = 800;
+          const int PAD = 15;
+          const int METRICS_X = 205;
+          const int FORECAST_HEIGHT = 120;
+          const int CAL_LINE = 24;
 
-#################### RYSOWANIE ####################
-    lambda: |-
-      // ========== SPRAWDZENIE TRYBU AWARYJNEGO ==========
-      if (id(emergency_mode_active)) {
-        ESP_LOGW("display", "🚨 Rendering EMERGENCY screen");
-        
-        const int W = 480;
-        const int H = 800;
-        const auto BLACK = Color(255, 255, 255);
-        const auto WHITE = Color(0, 0, 0);
-        const auto GRAY = Color(170, 170, 170);
-        
-        it.fill(WHITE);
-        
-        // Duża ikona alert-circle-outline
-        it.printf(W/2, H/2 - 100, id(mdi_large), BLACK, 
-                  TextAlign::CENTER, "\U000F05D6");
-        
-        // Tekst główny
-        it.printf(W/2, H/2 + 60, id(f_header), BLACK, 
-                  TextAlign::CENTER, "BRAK POŁĄCZENIA");
-        
-        // Info o ponownej próbie
-        it.printf(W/2, H/2 + 120, id(f_normal), GRAY, 
-                  TextAlign::CENTER, "Ponowna próba za 10 min");
-        
-        // Timestamp ostatniej próby
-        auto t = id(sntp_time).now();
-        if (t.is_valid()) {
-          char time_str[64];
-          snprintf(time_str, sizeof(time_str), "Ostatnia próba: %02d:%02d", 
-                   t.hour, t.minute);
-          it.printf(W/2, H - 50, id(f_small), GRAY, 
-                    TextAlign::CENTER, "%s", time_str);
-        } else {
-          it.printf(W/2, H - 50, id(f_small), GRAY, 
-                    TextAlign::CENTER, "Brak synchronizacji czasu");
-        }
-        
-        ESP_LOGI("display", "✅ Emergency screen rendered");
-        return;  // ← WAŻNE! Nie rysuj normalnego ekranu
-      }
-      
-      // ========== NORMALNY EKRAN ==========
-      ESP_LOGI("display", "🖼️ Rendering new layout...");
+          auto ok = [](float v) { return !std::isnan(v); };
 
-      const int W = 480;
-      const int H = 800;
-      const int PAD = 15;
+          auto get_icon = [](const std::string &c) -> const char * {
+            if (c == "sunny" || c == "clear-day") return "\U000F0599";
+            if (c == "clear-night") return "\U000F0594";
+            if (c == "partlycloudy" || c == "partly-cloudy-day" || c == "partly-cloudy-night") return "\U000F0595";
+            if (c == "cloudy") return "\U000F0590";
+            if (c == "fog" || c == "hazy") return "\U000F0591";
+            if (c == "rainy") return "\U000F0597";
+            if (c == "pouring") return "\U000F0596";
+            if (c == "lightning") return "\U000F0593";
+            if (c == "lightning-rainy" || c == "thunderstorm") return "\U000F067E";
+            if (c == "snowy") return "\U000F0598";
+            if (c == "snowy-rainy") return "\U000F067F";
+            if (c == "hail") return "\U000F0592";
+            if (c == "windy" || c == "windy-variant") return "\U000F059E";
+            return "\U000F1BE0";   // exceptional / unknown / unavailable
+          };
 
-      const int MAIN_ICON_X = 95;
-      const int MAIN_TEMP_X = 95;
-      const int METRICS_X = 205;
+          // slot prognozy: "HH:00|condition|temp"
+          auto draw_slot = [&](int x, int yy, const std::string &s) {
+            size_t p1 = s.find('|');
+            size_t p2 = (p1 == std::string::npos) ? p1 : s.find('|', p1 + 1);
+            if (p2 == std::string::npos) return;
+            std::string label = s.substr(0, p1);
+            std::string cond = s.substr(p1 + 1, p2 - p1 - 1);
+            it.printf(x, yy, id(f_normal), COLOR_ON, TextAlign::TOP_CENTER, "%s", label.c_str());
+            it.printf(x, yy + 55, id(mdi_small), COLOR_ON, TextAlign::CENTER, "%s", get_icon(cond));
+            if (cond == "unknown") {
+              it.print(x, yy + 85, id(f_normal), COLOR_ON, TextAlign::TOP_CENTER, "--");
+            } else {
+              it.printf(x, yy + 85, id(f_normal), COLOR_ON, TextAlign::TOP_CENTER, "%.0f°C", atof(s.c_str() + p2 + 1));
+            }
+          };
 
-      const int FORECAST_HEIGHT = 120;
-      const int CALENDAR_Y_START_OFFSET = 5;
-      const int CALENDAR_LINE_HEIGHT = 45;
-      const int LINE_SPACING = 24;
+          auto t = id(ha_time).now();
+          const char *dni[] = {"NIEDZIELA", "PONIEDZIAŁEK", "WTOREK", "ŚRODA", "CZWARTEK", "PIĄTEK", "SOBOTA"};
+          int dow = (t.day_of_week >= 1 && t.day_of_week <= 7) ? t.day_of_week - 1 : 0;
+          int y = PAD;
 
-      const auto BLACK = Color(255, 255, 255);
-      const auto WHITE = Color(0, 0, 0);
-      const auto GRAY = Color(170, 170, 170);
-      const auto LINE = Color(85, 85, 85);
+          // ===== NAGŁÓWEK =====
+          it.printf(PAD - 5, y - 5, id(mdi_medium), COLOR_ON, "\U000F07D0");
+          it.printf(W / 2 + 15, y, id(f_header), COLOR_ON, TextAlign::TOP_CENTER, "%02d.%02d.%04d %s",
+                    t.day_of_month, t.month, t.year, dni[dow]);
+          y += 45;
+          it.line(PAD, y, W - PAD, y);
+          y += 15;
 
-      it.fill(WHITE);
-
-      // --- 1. FUNKCJA PARSUJĄCA POGODĘ Z DYNAMICZNĄ GODZINĄ ---
-      auto parse_forecast_with_time = [](const std::string &s) -> std::tuple<std::string, std::string, float> {
-        size_t first_pipe = s.find('|');
-        if (first_pipe == std::string::npos) {
-          return {"--:--", "unknown", 0.0};
-        }
-        
-        std::string time_label = s.substr(0, first_pipe);
-        time_label.erase(0, time_label.find_first_not_of(" \n\r\t"));
-        time_label.erase(time_label.find_last_not_of(" \n\r\t") + 1);
-        
-        size_t second_pipe = s.find('|', first_pipe + 1);
-        if (second_pipe == std::string::npos) {
-          return {time_label, "unknown", 0.0};
-        }
-        
-        std::string cond = s.substr(first_pipe + 1, second_pipe - first_pipe - 1);
-        cond.erase(0, cond.find_first_not_of(" \n\r\t"));
-        cond.erase(cond.find_last_not_of(" \n\r\t") + 1);
-        
-        float temp = atof(s.substr(second_pipe + 1).c_str());
-        
-        return {time_label, cond, temp};
-      };
-
-      // --- 2. FUNKCJA DOBIERAJĄCA IKONY ---
-      auto get_icon = [](const std::string &c) -> const char* {
-        if (c == "sunny" || c == "clear-day") return "\U000F0599";
-        if (c == "clear-night") return "\U000F0594";
-        if (c == "partlycloudy" || c == "partly-cloudy-day" || c == "partly-cloudy-night") {
-          return "\U000F0595";
-        }
-        if (c == "cloudy") return "\U000F0590";
-        if (c == "fog" || c == "hazy") return "\U000F0591";
-        if (c == "rainy") return "\U000F0597";
-        if (c == "pouring") return "\U000F0596";
-        if (c == "lightning") return "\U000F0593";
-        if (c == "lightning-rainy" || c == "thunderstorm") return "\U000F067E";
-        if (c == "snowy") return "\U000F0598";
-        if (c == "snowy-rainy") return "\U000F067F";
-        if (c == "hail") return "\U000F0592";
-        if (c == "windy" || c == "windy-variant") return "\U000F059E";
-        if (c == "exceptional" || c == "unknown") return "\U000F1BE0";
-        ESP_LOGW("weather", "Unknown weather condition: '%s' - using icon-alert", c.c_str());
-        return "\U000F1BE0";
-      };
-
-      auto t = id(sntp_time).now();
-      const char* dni[] = {"NIEDZIELA", "PONIEDZIAŁEK", "WTOREK", "ŚRODA",
-                           "CZWARTEK", "PIĄTEK", "SOBOTA"};
-      int y = PAD;
-
-      // ========== NAGŁÓWEK ==========
-      it.printf(PAD - 5, y - 5, id(mdi_medium), BLACK, "\U000F07D0");
-
-      const int HEADER_CENTER_X = W/2 + 15; 
-
-      char date[64];
-      snprintf(date, sizeof(date), "%02d.%02d.%04d %s",
-               t.day_of_month, t.month, t.year, dni[t.day_of_week - 1]);
-      
-      it.printf(HEADER_CENTER_X, y, id(f_header), BLACK, TextAlign::TOP_CENTER, "%s", date);
-
-      y += 45;
-      it.line(PAD, y, W - PAD, y, LINE);
-      y += 15;
-
-      // ========== SEKCJA GŁÓWNA: IKONA + TEMP + METRYKI ==========
-      int main_y = y;
-
-      // LEWA: Ikona + temperatura
-      if (id(weather_state).has_state()) {
-        std::string ws = std::string(id(weather_state).state.c_str());
-        ESP_LOGI("weather", "Main weather state: '%s'", ws.c_str());
-        it.printf(MAIN_ICON_X, main_y + 70, id(mdi_large), BLACK, TextAlign::CENTER, "%s", get_icon(ws));
-      }
-
-      if (id(temp).has_state()) {
-        char tmp[16];
-        snprintf(tmp, sizeof(tmp), "%.0f°C", id(temp).state);
-        it.printf(MAIN_TEMP_X, main_y + 160, id(f_big), BLACK, TextAlign::CENTER, "%s", tmp);
-      }
-
-      // PRAWA: Metryki
-      int met_x = METRICS_X;
-      int met_y = main_y + 18;  // ← Przesunięcie wyżej dla nowej metryki
-
-      // Temperatura odczuwalna (NOWA METRYKA NA GÓRZE)
-      if (id(feels_like).has_state()) {
-        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F10C3");
-        it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Odczuwalna: %.0f°C", id(feels_like).state);
-        met_y += 28;
-      }
-
-      // Prognoza opadów (2h)
-      if (id(precipitation_forecast).has_state()) {
-        float precip_val = atof(id(precipitation_forecast).state.c_str());
-        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F054B");
-        it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Opady (2h): %.1f mm", precip_val);
-        met_y += 28;
-      }
-
-      if (id(humidity).has_state()) {
-        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F058E");
-        it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Wilgotność: %.0f%%", id(humidity).state);
-        met_y += 28;
-      }
-      if (id(pressure).has_state()) {
-        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F029A");
-        it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Ciśnienie: %.0f hPa", id(pressure).state);
-        met_y += 28;
-      }
-      if (id(wind).has_state()) {
-        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "\U000F059E");
-        it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Wiatr: %.1f km/h", id(wind).state);
-        met_y += 28;
-      }
-      if (id(air_quality).has_state()) {
-        std::string smog_level = id(air_quality).state.c_str();
-
-        const char* smog_icon;
-        if (smog_level == "niski" || smog_level == "średni" || smog_level == "bardzo niski") {
-          smog_icon = "\U000F0BC8";
-        } else {
-          smog_icon = "\U000F0BC7";
-        }
-
-        it.printf(met_x, met_y + 3, id(mdi_micro), BLACK, "%s", smog_icon);
-        it.printf(met_x + 28, met_y, id(f_normal), BLACK, "Smog: %s", smog_level.c_str());
-        met_y += 28;
-      }
-
-      y = main_y + 220;
-      it.line(PAD, y, W - PAD, y, LINE);
-      y += 15;
-
-      // ========== PROGNOZA GODZINOWA - DYNAMICZNA CO 2H ==========
-      auto draw_hour_dynamic = [&](int x, int yy, const std::string &fc_str) {
-        auto [time_label, cond, temp] = parse_forecast_with_time(fc_str);
-        
-        ESP_LOGI("weather", "Forecast %s: condition='%s', temp=%.1f", 
-                 time_label.c_str(), cond.c_str(), temp);
-
-        const int ICON_Y = yy + 55;
-        const int TEMP_Y = yy + 85;
-
-        it.printf(x, yy, id(f_normal), BLACK, TextAlign::TOP_CENTER, "%s", time_label.c_str());
-        it.printf(x, ICON_Y, id(mdi_small), BLACK, TextAlign::CENTER, "%s", get_icon(cond));
-        char t_str[16];
-        snprintf(t_str, sizeof(t_str), "%.0f°C", temp);
-        it.printf(x, TEMP_Y, id(f_normal), BLACK, TextAlign::TOP_CENTER, "%s", t_str);
-      };
-
-      int fc_y = y;
-      int col = W / 3;
-
-      if (id(forecast_12).has_state()) {
-        draw_hour_dynamic(col/2, fc_y, id(forecast_12).get_state());
-      }
-      if (id(forecast_16).has_state()) {
-        draw_hour_dynamic(W/2, fc_y, id(forecast_16).get_state());
-      }
-      if (id(forecast_20).has_state()) {
-        draw_hour_dynamic(W - col/2, fc_y, id(forecast_20).get_state());
-      }
-
-      int CALENDAR_Y_START = fc_y + FORECAST_HEIGHT + CALENDAR_Y_START_OFFSET;
-
-      it.line(PAD, CALENDAR_Y_START, W - PAD, CALENDAR_Y_START, LINE);
-      CALENDAR_Y_START += 15;
-
-      // ========== KALENDARZ (8 Linii) ==========
-      int current_y = CALENDAR_Y_START;
-
-      ESP_LOGI("display", "✏️ Starting Calendar block at Y=%d", current_y);
-
-      it.printf(PAD, current_y, id(f_header), BLACK, "KALENDARZ:");
-      current_y += CALENDAR_LINE_HEIGHT;
-
-      auto is_today = [&t](const std::string &line) -> bool {
-        if (line.empty()) return false;
-
-        size_t space_pos = line.find(' ');
-        if (space_pos == std::string::npos) return false;
-
-        std::string date_part = line.substr(space_pos + 1);
-
-        size_t dot_pos = date_part.find('.');
-        if (dot_pos == std::string::npos) return false;
-
-        int event_day = atoi(date_part.substr(0, dot_pos).c_str());
-
-        size_t second_dot = date_part.find('.', dot_pos + 1);
-        if (second_dot == std::string::npos) {
-          second_dot = date_part.find(' ', dot_pos + 1);
-        }
-
-        int event_month = atoi(date_part.substr(dot_pos + 1, second_dot - dot_pos - 1).c_str());
-
-        return (event_day == t.day_of_month && event_month == t.month);
-      };
-
-      // Linia 1
-      if (id(Kalendarz_Linia_1).has_state()) {
-        std::string l1_state = id(Kalendarz_Linia_1).get_state();
-        if (!l1_state.empty()) {
-          auto font = is_today(l1_state) ? id(f_small_bold) : id(f_small);
-          it.print(PAD, current_y, font, BLACK, l1_state.c_str());
-        }
-      }
-      current_y += LINE_SPACING;
-
-      // Linia 2
-      if (id(Kalendarz_Linia_2).has_state()) {
-        std::string l2_state = id(Kalendarz_Linia_2).get_state();
-        if (!l2_state.empty()) {
-          auto font = is_today(l2_state) ? id(f_small_bold) : id(f_small);
-          it.print(PAD, current_y, font, BLACK, l2_state.c_str());
-        }
-      }
-      current_y += LINE_SPACING;
-
-      // Linia 3
-      if (id(Kalendarz_Linia_3).has_state()) {
-        std::string l3_state = id(Kalendarz_Linia_3).get_state();
-        if (!l3_state.empty()) {
-          auto font = is_today(l3_state) ? id(f_small_bold) : id(f_small);
-          it.print(PAD, current_y, font, BLACK, l3_state.c_str());
-        }
-      }
-      current_y += LINE_SPACING;
-
-      // Linia 4
-      if (id(Kalendarz_Linia_4).has_state()) {
-        std::string l4_state = id(Kalendarz_Linia_4).get_state();
-        if (!l4_state.empty()) {
-          auto font = is_today(l4_state) ? id(f_small_bold) : id(f_small);
-          it.print(PAD, current_y, font, BLACK, l4_state.c_str());
-        }
-      }
-      current_y += LINE_SPACING;
-
-      // Linia 5
-      if (id(Kalendarz_Linia_5).has_state()) {
-        std::string l5_state = id(Kalendarz_Linia_5).get_state();
-        if (!l5_state.empty()) {
-          auto font = is_today(l5_state) ? id(f_small_bold) : id(f_small);
-          it.print(PAD, current_y, font, BLACK, l5_state.c_str());
-        }
-      }
-      current_y += LINE_SPACING;
-
-      // Linia 6
-      if (id(Kalendarz_Linia_6).has_state()) {
-        std::string l6_state = id(Kalendarz_Linia_6).get_state();
-        if (!l6_state.empty()) {
-          auto font = is_today(l6_state) ? id(f_small_bold) : id(f_small);
-          it.print(PAD, current_y, font, BLACK, l6_state.c_str());
-        }
-      }
-      current_y += LINE_SPACING;
-
-      // Linia 7
-      if (id(Kalendarz_Linia_7).has_state()) {
-        std::string l7_state = id(Kalendarz_Linia_7).get_state();
-        if (!l7_state.empty()) {
-          auto font = is_today(l7_state) ? id(f_small_bold) : id(f_small);
-          it.print(PAD, current_y, font, BLACK, l7_state.c_str());
-        }
-      }
-      current_y += LINE_SPACING;
-
-      // Linia 8
-      if (id(Kalendarz_Linia_8).has_state()) {
-        std::string l8_state = id(Kalendarz_Linia_8).get_state();
-        if (!l8_state.empty()) {
-          auto font = is_today(l8_state) ? id(f_small_bold) : id(f_small);
-          it.print(PAD, current_y, font, BLACK, l8_state.c_str());
-        }
-      }
-
-      // ========== STOPKA ==========
-      it.line(PAD, H - 35, W - PAD, H - 35, LINE);
-
-      char upd[64];
-      snprintf(upd, sizeof(upd), "Aktualizacja: %02d.%02d.%04d %02d:%02d",
-               t.day_of_month, t.month, t.year, t.hour, t.minute);
-      it.printf(PAD, H - 7, id(f_small), GRAY, TextAlign::BOTTOM_LEFT, "%s", upd);
-
-      if (id(battery_level).has_state()) {
-        float bat_val = id(battery_level).state;
-
-        if (!isnan(bat_val) && bat_val >= 0 && bat_val <= 100) {
-          char bat[16];
-          snprintf(bat, sizeof(bat), "%.0f%%", bat_val);
-
-          const char* bat_icon;
-          if (bat_val <= 5) {
-            bat_icon = "\U000F10CD";
-          } else if (bat_val <= 25) {
-            bat_icon = "\U000F007A";
-          } else if (bat_val <= 60) {
-            bat_icon = "\U000F007E";
-          } else {
-            bat_icon = "\U000F0082";
+          // ===== POGODA BIEŻĄCA =====
+          int main_y = y;
+          if (id(weather_state).has_state()) {
+            it.printf(95, main_y + 70, id(mdi_large), COLOR_ON, TextAlign::CENTER, "%s", get_icon(id(weather_state).state));
+          }
+          if (ok(id(w_temp).state)) {
+            it.printf(95, main_y + 160, id(f_big), COLOR_ON, TextAlign::CENTER, "%.0f°C", id(w_temp).state);
           }
 
-          it.printf(W - PAD, H - 7, id(mdi_micro), GRAY, TextAlign::BOTTOM_RIGHT, "%s", bat_icon);
-          it.printf(W - PAD - 30, H - 7, id(f_small), GRAY, TextAlign::BOTTOM_RIGHT, "%s", bat);
-        }
-      }
+          int my = main_y + 18;
+          char buf[48];
+          auto metric = [&](const char *icon, const char *text) {
+            it.printf(METRICS_X, my + 3, id(mdi_micro), COLOR_ON, "%s", icon);
+            it.printf(METRICS_X + 28, my, id(f_normal), COLOR_ON, "%s", text);
+            my += 28;
+          };
+          if (ok(id(w_feels).state)) {
+            snprintf(buf, sizeof(buf), "Odczuwalna: %.0f°C", id(w_feels).state);
+            metric("\U000F10C3", buf);
+          }
+          if (ok(id(w_precip).state)) {
+            snprintf(buf, sizeof(buf), "Opady (2h): %.1f mm", id(w_precip).state);
+            metric("\U000F054B", buf);
+          }
+          if (ok(id(w_humidity).state)) {
+            snprintf(buf, sizeof(buf), "Wilgotność: %.0f%%", id(w_humidity).state);
+            metric("\U000F058E", buf);
+          }
+          if (ok(id(w_pressure).state)) {
+            snprintf(buf, sizeof(buf), "Ciśnienie: %.0f hPa", id(w_pressure).state);
+            metric("\U000F029A", buf);
+          }
+          if (ok(id(w_wind).state)) {
+            snprintf(buf, sizeof(buf), "Wiatr: %.1f km/h", id(w_wind).state);
+            metric("\U000F059E", buf);
+          }
+          if (id(air_quality).has_state()) {
+            const std::string &s = id(air_quality).state;
+            if (!s.empty() && s != "unavailable" && s != "unknown" && s != "None") {
+              bool low = (s == "niski" || s == "bardzo niski" || s == "średni");
+              snprintf(buf, sizeof(buf), "Smog: %s", s.c_str());
+              metric(low ? "\U000F0BC8" : "\U000F0BC7", buf);
+            }
+          }
 
-      ESP_LOGI("display", "✅ Render done | SRAM: %d KB",
-               heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
+          y = main_y + 220;
+          it.line(PAD, y, W - PAD, y);
+          y += 15;
+
+          // ===== PROGNOZA (+2h / +4h / +6h) =====
+          const int col = W / 3;
+          if (id(fc_1).has_state()) draw_slot(col / 2, y, id(fc_1).state);
+          if (id(fc_2).has_state()) draw_slot(W / 2, y, id(fc_2).state);
+          if (id(fc_3).has_state()) draw_slot(W - col / 2, y, id(fc_3).state);
+
+          y += FORECAST_HEIGHT + 5;
+          it.line(PAD, y, W - PAD, y);
+          y += 15;
+
+          // ===== KALENDARZ =====
+          it.print(PAD, y, id(f_header), COLOR_ON, "KALENDARZ:");
+          y += 45;
+          if (id(cal_lines).has_state()) {
+            const std::string &all = id(cal_lines).state;
+            size_t pos = 0;
+            for (int n = 0; n < ${cal_lines_max} && pos <= all.size(); n++) {
+              size_t nl = all.find('\n', pos);
+              std::string line = all.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+              if (!line.empty()) {
+                bool today = line.rfind("Dziś", 0) == 0;
+                auto font = today ? id(f_small_bold) : id(f_small);
+                it.print(PAD, y, font, COLOR_ON, line.c_str());
+              }
+              y += CAL_LINE;
+              if (nl == std::string::npos) break;
+              pos = nl + 1;
+            }
+          }
+
+          // ===== STOPKA =====
+          it.line(PAD, H - 35, W - PAD, H - 35);
+          it.printf(PAD, H - 7, id(f_small), COLOR_ON, TextAlign::BOTTOM_LEFT, "Aktualizacja: %02d.%02d.%04d %02d:%02d",
+                    t.day_of_month, t.month, t.year, t.hour, t.minute);
+          float bat = id(battery_level).state;
+          if (ok(bat)) {
+            const char *icon = bat <= 5 ? "\U000F10CD" : bat <= 25 ? "\U000F007A" : bat <= 60 ? "\U000F007E" : "\U000F0082";
+            it.printf(W - PAD, H - 7, id(mdi_micro), COLOR_ON, TextAlign::BOTTOM_RIGHT, "%s", icon);
+            it.printf(W - PAD - 30, H - 7, id(f_small), COLOR_ON, TextAlign::BOTTOM_RIGHT, "%.0f%%", bat);
+          }
+
+      # ---------------------------------------------------------------
+      - id: page_error
+        lambda: |-
+          const int W = 480;
+          const int H = 800;
+          it.printf(W / 2, H / 2 - 100, id(mdi_large), COLOR_ON, TextAlign::CENTER, "\U000F05D6");
+          it.print(W / 2, H / 2 + 60, id(f_header), COLOR_ON, TextAlign::CENTER, "BRAK POŁĄCZENIA");
+          it.print(W / 2, H / 2 + 120, id(f_normal), COLOR_ON, TextAlign::CENTER, "Ponowna próba za ${emergency_sleep_min} min");
+          auto t = id(ha_time).now();
+          if (t.is_valid()) {
+            it.printf(W / 2, H - 50, id(f_small), COLOR_ON, TextAlign::CENTER, "Ostatnia próba: %02d:%02d", t.hour, t.minute);
+          } else {
+            it.print(W / 2, H - 50, id(f_small), COLOR_ON, TextAlign::CENTER, "Brak synchronizacji czasu");
+          }
