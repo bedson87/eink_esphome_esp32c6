@@ -1,0 +1,174 @@
+### add to main HA config file
+
+template:
+  # ---------------------------------------------------------------------
+  #  KALENDARZ - co 15 min -> sensor.e_ink_kalendarz (atrybut `lines`)
+  # ---------------------------------------------------------------------
+  - triggers:
+      - trigger: time_pattern
+        minutes: "/15"
+        id: tick
+      - trigger: homeassistant
+        event: start
+        id: start
+      - trigger: event
+        event_type: event_template_reloaded
+        id: reload
+    actions:
+      # po starcie HA daj czas na załadowanie kalendarzy (do tego czasu zostają przywrócone stare dane)
+      - if:
+          - condition: trigger
+            id: start
+        then:
+          - delay: "00:00:30"
+      # wartości początkowe = puste, więc szablon nie dostaje "undefined"
+      - variables:
+          cal_1: {}
+          cal_2: {}
+          cal_3: {}
+          cal_4: {}
+      # każdy kalendarz osobno: awaria jednego nie kasuje reszty
+      - action: calendar.get_events
+        target:
+          entity_id: calendar.XXXX_gmail_com
+        data:
+          duration:
+            days: 7
+        response_variable: cal_1
+        continue_on_error: true
+      - action: calendar.get_events
+        target:
+          entity_id: calendar.XXXX_gmail_com
+        data:
+          duration:
+            days: 7
+        response_variable: cal_2
+        continue_on_error: true
+      - action: calendar.get_events
+        target:
+          entity_id: calendar.birthdays
+        data:
+          duration:
+            days: 7
+        response_variable: cal_3
+        continue_on_error: true
+      - action: calendar.get_events
+        target:
+          entity_id: calendar.swieta_w_polsce
+        data:
+          duration:
+            days: 7
+        response_variable: cal_4
+        continue_on_error: true
+    sensor:
+      - name: E-ink kalendarz
+        unique_id: eink_kalendarz
+        device_class: timestamp
+        state: "{{ now() }}"
+        attributes:
+          lines: >
+            {% set dni = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Nd'] %}
+            {% set ns = namespace(ev=[], out=[]) %}
+            {% for src in [cal_1, cal_2, cal_3, cal_4] %}
+              {% for resp in src.values() %}
+                {% for e in resp.events %}
+                  {% set ns.ev = ns.ev + [{
+                    'ts': as_local(as_datetime(e.start)).timestamp(),
+                    'start': e.start,
+                    'summary': e.summary | default('Brak tytułu')
+                  }] %}
+                {% endfor %}
+              {% endfor %}
+            {% endfor %}
+            {% for x in (ns.ev | sort(attribute='ts'))[:8] %}
+              {% set dt = as_local(as_datetime(x.start)) %}
+              {% set diff = (dt.date() - now().date()).days %}
+              {% set day = 'Dziś' if diff <= 0 else 'Jutro' if diff == 1 else dni[dt.weekday()] ~ ' ' ~ dt.strftime('%d.%m') %}
+              {% set hm = ' ' ~ dt.strftime('%H:%M') if 'T' in x.start else '' %}
+              {% set ns.out = ns.out + [(day ~ hm ~ ' – ' ~ x.summary) | truncate(42, true, '…', 0)] %}
+            {% endfor %}
+            {% set got = [cal_1, cal_2, cal_3, cal_4] | select | list | count %}
+            {{ ns.out | join('\n') if ns.out else ('Brak wydarzeń w 7 dni' if got else 'Brak danych kalendarza') }}
+
+  # ---------------------------------------------------------------------
+  #  POGODA - co 30 min -> sensor.e_ink_pogoda
+  #  (ramka budzi się ok. :01, więc dane mają <1 min)
+  # ---------------------------------------------------------------------
+  - triggers:
+      - trigger: time_pattern
+        minutes: "/30"
+        id: tick
+      - trigger: homeassistant
+        event: start
+        id: start
+      - trigger: event
+        event_type: event_template_reloaded
+        id: reload
+    actions:
+      - if:
+          - condition: trigger
+            id: start
+        then:
+          - delay: "00:00:30"
+      - variables:
+          fc_raw: {}
+      - action: weather.get_forecasts
+        target:
+          entity_id: weather.home
+        data:
+          type: hourly
+        response_variable: fc_raw
+        continue_on_error: true
+      - variables:
+          fc: "{{ fc_raw.get('weather.home', {}).get('forecast', []) }}"
+          # +2h / +4h / +6h liczone od pełnej godziny; wybieramy pierwszy wpis >= cel.
+          # Brak prognozy -> condition "unknown" (ramka pokaże "--", nie fałszywe dane).
+          slots: >
+            {% set base = now().replace(minute=0, second=0, microsecond=0) %}
+            {% set out = namespace(l=[]) %}
+            {% for h in [2, 4, 6] %}
+              {% set target = (base + timedelta(hours=h)).timestamp() %}
+              {% set pick = namespace(f=none) %}
+              {% for f in fc %}
+                {% if pick.f is none and as_timestamp(f.datetime) >= target %}
+                  {% set pick.f = f %}
+                {% endif %}
+              {% endfor %}
+              {% if pick.f is not none %}
+                {% set out.l = out.l + [as_local(as_datetime(pick.f.datetime)).strftime('%H:00') ~ '|' ~ pick.f.condition ~ '|' ~ (pick.f.temperature | float(0) | round(0) | int)] %}
+              {% else %}
+                {% set out.l = out.l + [(base + timedelta(hours=h)).strftime('%H:00') ~ '|unknown|0'] %}
+              {% endif %}
+            {% endfor %}
+            {{ out.l }}
+          # suma opadów z bieżącej i następnej godziny
+          precip: >
+            {% set base = now().replace(minute=0, second=0, microsecond=0) %}
+            {% set lo = base.timestamp() %}
+            {% set hi = (base + timedelta(hours=2)).timestamp() %}
+            {% set ns = namespace(s=0.0) %}
+            {% for f in fc %}
+              {% set ts = as_timestamp(f.datetime) %}
+              {% if lo <= ts < hi %}
+                {% set ns.s = ns.s + (f.precipitation | float(0)) %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.s | round(1) }}
+    sensor:
+      - name: E-ink pogoda
+        unique_id: eink_pogoda
+        device_class: timestamp
+        state: "{{ now() }}"
+        attributes:
+          condition: "{{ states('weather.home') }}"
+          temperature: "{{ state_attr('weather.home', 'temperature') | float(none) }}"
+          feels_like: "{{ states('sensor.home_temperature_feels_like') | float(none) }}"
+          humidity: "{{ state_attr('weather.home', 'humidity') | float(none) }}"
+          pressure: "{{ state_attr('weather.home', 'pressure') | float(none) }}"
+          wind_speed: "{{ state_attr('weather.home', 'wind_speed') | float(none) }}"
+          precip_2h: "{{ precip }}"
+          smog: "{{ states('sensor.airly_poziom_smogu_pl') | lower }}"
+          forecast_1: "{{ slots[0] }}"
+          forecast_2: "{{ slots[1] }}"
+          forecast_3: "{{ slots[2] }}"
+
