@@ -42,16 +42,11 @@ Do monitorowania poziomu naładowania baterii zastosowano **dzielnik napięcia 1
 
 ## 🏡 Integracja z Home Assistant (ESPHome)
 
-Projekt wykorzystuje **ESPHome** do komunikacji z HA. Dane są wstępnie przygotowywane w Home Assistant za pomocą *Text Helpers* i automatyzacji, a następnie pobierane przez urządzenie E-Ink.
+Projekt wykorzystuje **ESPHome** do komunikacji z HA. Dane są wstępnie przygotowywane w Home Assistant za pomocą automatyzacji, a następnie pobierane przez urządzenie E-Ink.
 
 ### Wymagane Encje w Home Assistant
-
-| Typ Encji | Przykład | Cel |
-| :--- | :--- | :--- |
-| **Text Helper (Pogoda)** | `input_text.eink_forecast_12_wu` | 3 helpery przechowujące prognozę pogody na najbliższe godziny (+1h, +2h, +4h). |
-| **Text Helper (Kalendarz)** | `input_text.kalendarz_e_ink_linia1` | 8 helperów (linii) przechowujących najbliższe wydarzenia z kalendarzy HA. |
-| **Sensor (Jakość Powietrza)** | `sensor.airly_poziom_smogu_pl` | 1 encja pomocnicza z danymi o jakości powietrza (np. z Airly). |
-| **Boolean Helper (Sterowanie)** | `input_boolean.zapobiega_deepsleep_esp_ramka` | Włącznik/wyłącznik do tymczasowego zablokowania wejścia ESP w *deepsleep*. |
+Automatyzacja w template, tworzy odpowiednie encje z atrybutami:
+**sensor.e_ink_kalendarz** z atrybutem lines (do 8 linii rozdzielonych \n) oraz **sensor.e_ink_pogoda** z atrybutami condition, temperature, feels_like, humidity, pressure, wind_speed, precip_2h, smog, forecast_1..3.
 
 ---
 
